@@ -2,10 +2,10 @@ python-telegram-bot==21.6
 python-dotenv==1.0.1
 requests==2.32.3
 
-# LangChain + Gemini 
+# LangChain + Gemini (compatibles entre sí)
 langchain==0.2.16
 langchain-google-genai==1.0.7
-google-generativeai==0.8.3
+google-generativeai==0.7.2
 
 yfinance==0.2.43
 curl_cffi==0.6.2
