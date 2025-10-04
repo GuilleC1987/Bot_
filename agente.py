@@ -216,7 +216,7 @@ class AgenteMultiAPI:
             ),
             Tool(
                 name="PrecioCripto",
-                func=self.herramienta_cripto.obtener_precio_cripto,
+                func=self.herramienta_cripto.obtener_precio,
                 description="Precio de una criptomoneda. Ej.: 'bitcoin', 'btc', 'eth usd'. Devuelve precio y % 24h.",
             ),
             Tool(
