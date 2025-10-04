@@ -137,15 +137,15 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Memoria reiniciada para este chat.")
 
 async def reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # --- definir SIEMPRE chat_id/variables primero ---
     if not update.message or not update.message.text:
         return
-
     chat_id = update.effective_chat.id
     user_text = (update.message.text or "").strip()
     low = user_text.lower()
     agent = get_agent(chat_id)
 
-    # Salidas rápidas
+    # --- salidas rápidas (sin typing) ---
     if low in {"exit", "salir", "/exit"}:
         await update.message.reply_text("Adiós, gracias por usar el asistente.")
         return
@@ -154,7 +154,6 @@ async def reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(HELP_TEXT)
         return
 
-    # Primer mensaje de cualquier tipo -> instrucción de start
     if needs_first_step(chat_id):
         if low in {"start", "star"}:
             set_first_step(chat_id, False)
@@ -163,31 +162,29 @@ async def reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(INSTRUCCION_START)
         return
 
-    # Reinicio amable de saludo si escribe start/star otra vez
     if low in {"start", "star", "/start"}:
         set_first_step(chat_id, False)
         await update.message.reply_text(SALUDO_ESPECIAL)
         return
 
-    # Indicador 'typing' periódico mientras se procesa
+    # --- indicador typing (ya con chat_id definido) ---
     typing_job = None
     jq = getattr(context.application, "job_queue", None)
     if jq is not None:
         typing_job = jq.run_repeating(
             _typing_job,
-            interval=4.0,   # actualiza cada ~4 s
-            first=0.0,      # envía inmediatamente
+            interval=4.0,
+            first=0.0,
             data=chat_id,
             name=f"typing-{chat_id}",
         )
     else:
-        # Fallback si no hay JobQueue disponible
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
+    # --- llamada al agente ---
     try:
         loop = asyncio.get_running_loop()
-        call = partial(agent.agente.invoke, {"input": user_text})
-        resp = await loop.run_in_executor(None, call)
+        resp = await loop.run_in_executor(None, partial(agent.agente.invoke, {"input": user_text}))
         result = resp["output"] if isinstance(resp, dict) and "output" in resp else str(resp)
     except Exception as e:
         result = f"⚠️ Error al invocar el agente: {e}"
@@ -195,6 +192,7 @@ async def reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if typing_job:
             typing_job.schedule_removal()
 
+    # --- responde en trozos seguros ---
     for chunk in split_telegram(str(result)):
         await update.message.reply_text(chunk)
 
@@ -248,7 +246,7 @@ def main():
     log.info("Bot corriendo con long polling.")
     application.run_polling(
         close_loop=False,
-        drop_pending_updates=True,  # evita colas antiguas tras redeploy
+        drop_pending_updates=True,
     )
 
 if __name__ == "__main__":
