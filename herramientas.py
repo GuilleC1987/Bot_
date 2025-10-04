@@ -221,277 +221,139 @@ class HerramientaClima:
             location = data["location"]
             current = data["current"]
             clima_info = f"""
-Clima en {location['name']}, {location["country"]}
-Temperatura: {current["temp_c"]}°C (se siente como {current["feelslike_c"]}°C)
-Condición: {current["condition"]["text"]}
-Viento: {current["wind_kph"]} km/h
-Humedad: {current["humidity"]}%
-Visibilidad: {current["vis_km"]} km
-Última actualización: {current["last_updated"]}
-""".strip()
-            return clima_info
-        except Exception as e:
-            return f"Error al obtener el clima: {str(e)}"
+    Clima en {location['name']}, {location["country"]}
+    Temperatura: {current["temp_c"]}°C (se siente como {current["feelslike_c"]}°C)
+    Condición: {current["condition"]["text"]}
+    Viento: {current["wind_kph"]} km/h
+    Humedad: {current["humidity"]}%
+    Visibilidad: {current["vis_km"]} km
+    Última actualización: {current["last_updated"]}
+    """.strip()
+                return clima_info
+            except Exception as e:
+                return f"Error al obtener el clima: {str(e)}"
 
 
 # ============================================================
 #                   MERCADOS (Yahoo/Stooq)
 # ============================================================
-class HerramientaMercadosYahoo:
-    def __init__(self):
-        self._sess = requests.Session()
-        self._sess.headers.update({"User-Agent": "Mozilla/5.0"})
+class HerramientaAccionesStooq:
+    """
+    Precio de acciones usando Stooq (CSV público, sin API key).
+    - No depende de Yahoo ni yfinance.
+    - Convierte tickers US a formato 'aapl.us', 'tsla.us', etc.
+    - Incluye un pequeño diccionario de nombres comunes -> ticker.
+    """
 
-        ca = (
-            os.environ.get("REQUESTS_CA_BUNDLE")
-            or os.environ.get("SSL_CERT_FILE")
-            or os.environ.get("CURL_CA_BUNDLE")
-        )
-        if ca and os.path.exists(ca):
-            self._sess.verify = ca
+    # Nombres frecuentes -> ticker
+    SEED_TICKERS = {
+        "TESLA": "TSLA", "TESLA INC": "TSLA", "TESLA, INC.": "TSLA",
+        "APPLE": "AAPL", "APPLE INC": "AAPL",
+        "ALPHABET": "GOOGL", "GOOGLE": "GOOGL",
+        "MICROSOFT": "MSFT", "AMAZON": "AMZN",
+        "META": "META", "FACEBOOK": "META",
+        "NVIDIA": "NVDA", "NETFLIX": "NFLX",
+        "BERKSHIRE": "BRK-B", "BRK": "BRK-B", "BRK.B": "BRK-B",
+        "SP500": "SPY", "S&P500": "SPY", "S&P 500": "SPY",
+    }
 
     @staticmethod
     def _sanitize(q: str) -> str:
-        q = (q or "").strip()
-        if q.startswith("$"):
-            q = q[1:]
-        q = q.replace("–", "-").replace("—", "-")
-        if "." in q and "-" not in q:
-            q = q.replace(".", "-")
-        return re.sub(r"[^A-Za-z0-9\-. ]+", "", q).strip()
+        import re
+        return re.sub(r"[^A-Za-z0-9\-. ]+", "", (q or "").strip()).upper()
 
-    @staticmethod
-    def _fmt_epoch(ts: int) -> str:
-        return datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    def _name_to_ticker(self, q: str) -> str | None:
+        u = self._sanitize(q)
+        return self.SEED_TICKERS.get(u)
 
-    def _resolver_yahoo_simbolo(self, query: str) -> str | None:
-        q_raw = (query or "").strip()
-        if not q_raw:
-            return None
-        q = self._sanitize(q_raw)
-        allowed_exchs = {"NASDAQ", "NASDAQGS", "NYSE", "NMS", "NYQ", "NCM", "NSQ"}
-
-        # 1) Buscador principal
-        try:
-            resp = self._sess.get(
-                "https://query2.finance.yahoo.com/v1/finance/search",
-                params={"q": q, "quotesCount": 20, "newsCount": 0},
-                timeout=12,
-            )
-            resp.raise_for_status()
-            js = resp.json()
-            quotes = js.get("quotes") or []
-            if quotes:
-                equities = [it for it in quotes if (it.get("quoteType", "").upper() == "EQUITY")]
-                equities_us = [it for it in equities if (it.get("exchDisp", "").upper() in allowed_exchs)]
-                pool = equities_us or equities or quotes
-
-                def score(it):
-                    sc = 0
-                    name = (it.get("shortname") or it.get("longname") or "").lower()
-                    sym = (it.get("symbol") or "").upper()
-                    qt = (it.get("quoteType") or "").upper()
-                    exch = (it.get("exchDisp") or "").upper()
-                    for tok in q_raw.lower().split():
-                        if tok and tok in name:
-                            sc += 6
-                    if qt == "EQUITY":
-                        sc += 10
-                    if exch in allowed_exchs:
-                        sc += 6
-                    if len(sym) <= 6:
-                        sc += 1
-                    if sym == q.upper():
-                        sc += 2
-                    if qt and qt != "EQUITY":
-                        sc -= 10
-                    return sc
-
-                best = max(pool, key=score)
-                sym = (best.get("symbol") or "").upper().replace(".", "-")
-                if sym:
-                    return sym
-        except Exception:
-            pass
-
-        # 2) Fallback: 'autoc'
-        try:
-            resp = self._sess.get(
-                "https://autoc.finance.yahoo.com/autoc",
-                params={"query": q, "region": 1, "lang": "en"},
-                headers={"Accept": "application/json"},
-                timeout=12,
-            )
-            resp.raise_for_status()
-            js = resp.json()
-            results = (js.get("ResultSet") or {}).get("Result") or []
-            if results:
-                def score2(r):
-                    sc = 0
-                    sym = (r.get("symbol") or "").upper()
-                    nam = (r.get("name") or "").lower()
-                    exch = (r.get("exchDisp") or r.get("exch") or "").upper()
-                    typ = (r.get("type") or r.get("typeDisp") or "")
-                    for tok in q_raw.lower().split():
-                        if tok and tok in nam:
-                            sc += 6
-                    if typ in ("S", "Equity"):
-                        sc += 10
-                    if exch in allowed_exchs:
-                        sc += 6
-                    if len(sym) <= 6:
-                        sc += 1
-                    if sym == q.upper():
-                        sc += 2
-                    if typ and typ not in ("S", "Equity"):
-                        sc -= 10
-                    return sc
-
-                best = max(results, key=score2)
-                sym = (best.get("symbol") or "").upper().replace(".", "-")
-                if sym:
-                    return sym
-        except Exception:
-            pass
-
-        # 3) Fallback final
-        q_up = q.upper()
-        if q_up and " " not in q_up and all(ch.isalnum() or ch in {"-", "."} for ch in q_up):
-            return q_up.replace(".", "-")
-        return None
-
-    def _yahoo_quote_api(self, symbol: str) -> dict | None:
-        url = "https://query1.finance.yahoo.com/v7/finance/quote"
-        params = {"symbols": symbol}
-        try:
-            r = requests.get(url, params=params, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-            r.raise_for_status()
-            js = r.json()
-            res = ((js or {}).get("quoteResponse") or {}).get("result") or []
-            if not res:
-                return None
-            q = res[0]
-            out = {
-                "c": q.get("regularMarketPrice"),
-                "o": q.get("regularMarketOpen"),
-                "h": q.get("regularMarketDayHigh"),
-                "l": q.get("regularMarketDayLow"),
-                "pc": q.get("regularMarketPreviousClose"),
-                "t": q.get("regularMarketTime"),
-            }
-            if out["c"] is None:
-                return None
-            return out
-        except Exception:
-            return None
-
-    def _stooq_quote(self, symbol: str) -> dict | None:
+    def _to_stooq_symbol(self, ticker: str) -> str:
         """
-        Último recurso: Stooq (CSV). Intentamos con 'symbol' y 'symbol.us'.
+        Stooq usa minúsculas y sufijos de mercado:
+        - Acciones US:  aapl.us, tsla.us, googl.us, spy.us
+        - Reemplaza '.' por '-' (ej. BRK.B -> brk-b.us)
         """
-        try_syms = []
-        s0 = (symbol or "").lower()
-        if not s0:
-            return None
-        try_syms.append(s0)
-        if not s0.endswith(".us"):
-            try_syms.append(f"{s0}.us")
+        t = (ticker or "").strip().lower().replace(".", "-")
+        if not t:
+            return ""
+        # si no viene sufijo, asumimos US
+        if not t.endswith(".us") and not t.endswith(".pl") and not t.endswith(".de") and not t.endswith(".uk"):
+            t = f"{t}.us"
+        return t
 
-        for s in try_syms:
+    def _fetch_csv_quote(self, stooq_symbol: str) -> dict | None:
+        """
+        Llama a: https://stooq.com/q/l/?s=<sym>&f=sd2t2ohlcv&h&e=csv
+        Devuelve dict con c/o/h/l/pc y ts si hay datos, None si no hay.
+        """
+        url = f"https://stooq.com/q/l/?s={stooq_symbol}&f=sd2t2ohlcv&h&e=csv"
+        r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        rows = list(csv.DictReader(StringIO(r.text)))
+        if not rows:
+            return None
+        row = rows[0]
+        # Stooq pone 'N/A' si no encuentra
+        if (row.get("Close") or "").upper() in {"N/A", "N/D", ""}:
+            return None
+
+        def f(x):
             try:
-                url = f"https://stooq.com/q/l/?s={s}&f=sd2t2ohlcv&h&e=csv"
-                r = requests.get(url, timeout=10, headers={"User-Agent":"Mozilla/5.0"})
-                r.raise_for_status()
-                content = r.text.strip()
-                rows = list(csv.DictReader(StringIO(content)))
-                if not rows:
-                    continue
-                row = rows[0]
-                if row.get("Close") in ("N/D", "N/A", None, ""):
-                    continue
-
-                def f(x):
-                    try: return float(x)
-                    except Exception: return None
-
-                out = {
-                    "c": f(row.get("Close")),
-                    "o": f(row.get("Open")),
-                    "h": f(row.get("High")),
-                    "l": f(row.get("Low")),
-                    "pc": None,
-                    "t": int(datetime.now(timezone.utc).timestamp()),
-                }
-                if out["c"] is None:
-                    continue
-                return out
+                return float(x)
             except Exception:
-                continue
-        return None
+                return None
 
-    # ------------------------ Pública ------------------------
+        # Nota: Stooq no trae "previous close" directo aquí → lo dejamos N/D
+        return {
+            "c": f(row.get("Close")),
+            "o": f(row.get("Open")),
+            "h": f(row.get("High")),
+            "l": f(row.get("Low")),
+            "pc": None,
+            "t": int(datetime.now(timezone.utc).timestamp()),
+        }
+
     def obtener_precio_accion(self, symbol_o_nombre: str) -> str:
         """
-        Obtiene precio SIN yfinance (más estable en Render):
-        1) Yahoo Quote API
-        2) Stooq (CSV) como fallback
+        Acepta nombre o ticker:
+         - 'Tesla' -> TSLA -> tsla.us
+         - 'TSLA'  -> tsla.us
+         - 'AAPL'  -> aapl.us
         """
-        q = self._sanitize(symbol_o_nombre)              # quita '$', normaliza BRK.B -> BRK-B, etc.
+        q = self._sanitize(symbol_o_nombre)
         if not q:
             return "Debes indicar un símbolo o nombre (ej. AAPL, Apple)."
 
-        sym = self._resolver_yahoo_simbolo(q) or q       # resuelve nombre→ticker si es posible
+        # 1) si ya parece ticker (AAPL/TSLA/BRK-B), úsalo; si es nombre, intenta mapa
+        ticker = q if (len(q) <= 6 or "-" in q or "." in q) else self._name_to_ticker(q)
+        if not ticker:
+            # también probamos algunos aliases comunes
+            ticker = self._name_to_ticker(q) or q
 
-        # --- 1) Yahoo Quote API ---
-        qd = self._yahoo_quote_api(sym)
-        if qd:
-            ts = qd["t"] or int(time.time())
-            return (
-                f"=== {sym} ===\n"
-                f"Precio actual: {qd['c']}\n"
-                f"Apertura:     {qd['o'] if qd['o'] is not None else 'N/D'}\n"
-                f"Máximo día:   {qd['h'] if qd['h'] is not None else 'N/D'}\n"
-                f"Mínimo día:   {qd['l'] if qd['l'] is not None else 'N/D'}\n"
-                f"Cierre prev.: {qd['pc'] if qd['pc'] is not None else 'N/D'}\n"
-                f"Hora:         {self._fmt_epoch(ts)}"
-            )
-
-        # --- 2) Stooq fallback ---
-        q2 = self._stooq_quote(sym)
-        if q2:
-            ts = q2["t"]
-            return (
-                f"=== {sym} (stooq) ===\n"
-                f"Precio actual: {q2['c']}\n"
-                f"Apertura:     {q2['o'] if q2['o'] is not None else 'N/D'}\n"
-                f"Máximo día:   {q2['h'] if q2['h'] is not None else 'N/D'}\n"
-                f"Mínimo día:   {q2['l'] if q2['l'] is not None else 'N/D'}\n"
-                f"Cierre prev.: N/D\n"
-                f"Hora:         {self._fmt_epoch(ts)}"
-            )
-
-        return f"No pude obtener precio para {sym} ahora mismo."
-
-
-    def obtener_velas(self, symbol: str, resolution: str = "1m", dias: int = 1):
-        q = self._sanitize(symbol)
-        sym = self._resolver_yahoo_simbolo(q) or q
+        sym = self._to_stooq_symbol(ticker)
+        if not sym:
+            return f"No pude interpretar '{symbol_o_nombre}'."
 
         try:
-            import yfinance as yf
-            interval_map = {"1m":"1m","5m":"5m","15m":"15m","30m":"30m","60m":"60m","D":"1d","1d":"1d"}
-            interval = interval_map.get(resolution, "1m")
-            period = f"{dias}d" if interval != "1m" or dias > 1 else "1d"
-            df = yf.download(tickers=sym, period=period, interval=interval, progress=False, auto_adjust=False)
-            if df is None or df.empty:
-                return f"No hay datos de velas para {sym}."
-            o = df["Open"].tolist(); h = df["High"].tolist(); l = df["Low"].tolist()
-            c = df["Close"].tolist(); v = df["Volume"].tolist()
-            t = [int(pd_ts.timestamp()) for pd_ts in df.index.to_pydatetime()]
-            return {"s":"ok","t":t,"o":o,"h":h,"l":l,"c":c,"v":v}
-        except Exception as e:
-            return f"No pude obtener velas para {sym}: {e}"
+            quote = self._fetch_csv_quote(sym)
+        except Exception:
+            quote = None
 
+        if not quote or quote.get("c") is None:
+            return f"No pude obtener el precio de {ticker} en este momento."
+
+        ts = quote["t"]
+        def fmt_epoch(ts_: int):
+            return datetime.fromtimestamp(int(ts_), tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+        return (
+            f"=== {ticker.upper()} ===\n"
+            f"Precio actual: {quote['c']}\n"
+            f"Apertura:     {quote['o'] if quote['o'] is not None else 'N/D'}\n"
+            f"Máximo día:   {quote['h'] if quote['h'] is not None else 'N/D'}\n"
+            f"Mínimo día:   {quote['l'] if quote['l'] is not None else 'N/D'}\n"
+            f"Cierre prev.: {quote['pc'] if quote['pc'] is not None else 'N/D'}\n"
+            f"Hora:         {fmt_epoch(ts)}"
+        )
 # ============================================================
 #                       BÚSQUEDA WEB
 # ============================================================
@@ -788,27 +650,16 @@ class HerramientaCripto:
         display = (cid.capitalize() if cid else (sym_upper or "Cripto"))
         return f"{display} → {p['price']} {vs.upper()} (24h: {chg_txt})"
 
-    def obtener_top_criptos(self, n: int = 10, vs: str = "usd") -> str:
-        n = max(1, min(int(n), 50))
-        if time.time() < self._gecko_block_until:
-            return "CoinGecko está limitando consultas ahora mismo. Intenta de nuevo en unos segundos."
-        try:
-            js = self._get(
-                "/coins/markets",
-                {"vs_currency": vs, "order": "market_cap_desc", "per_page": n, "page": 1, "price_change_percentage": "24h"},
-            )
-        except requests.RequestException:
-            return "CoinGecko está limitando consultas ahora mismo. Intenta de nuevo en unos segundos."
+    def _tool_cripto_top(self, entrada: str) -> str:
+        n = 10
+        s = (entrada or "").strip()
+        if s:
+            m = re.search(r"(\d+)", s)
+            if m:
+                try:
+                    n = max(1, min(int(m.group(1)), 50))
+                except Exception:
+                    n = 10
+        # Llama al método correcto (con 's' y argumento 'n')
+        return self.herramienta_cripto.obtener_top_criptos(n=n, vs="usd")
 
-        if not isinstance(js, list) or not js:
-            return "No pude obtener el top de criptomonedas."
-
-        out = [f"Top {n} criptos por capitalización ({vs.upper()}):", ""]
-        for i, it in enumerate(js, 1):
-            name = it.get("name", "N/D")
-            sym = (it.get("symbol") or "").upper()
-            px = it.get("current_price")
-            ch = it.get("price_change_percentage_24h")
-            ch_txt = f"{ch:.2f}%" if isinstance(ch, (int, float)) else "N/D"
-            out.append(f"{i}. {name} ({sym}): {px} {vs.upper()}  |  24h: {ch_txt}")
-        return "\n".join(out)

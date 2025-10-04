@@ -17,7 +17,7 @@ from prompts import get_system_prompt, get_conversation_prompt
 from herramientas import (
     HerramientaFecha,
     HerramientaClima,
-    HerramientaMercadosYahoo,
+    HerramientaAccionesStooq,
     HerramientaBusquedaWeb,
     HerramientaCripto,
 )
@@ -69,7 +69,7 @@ class AgenteMultiAPI:
 
         # Herramientas externas (de herramientas.py)
         self.herramienta_clima = HerramientaClima(os.getenv("WEATHER_API_KEY"))
-        self.herramienta_noticias_financieras = HerramientaMercadosYahoo()
+        self.herramienta_acciones  = HerramientaAccionesStooq()
         self.herramienta_busqueda = HerramientaBusquedaWeb()
         self.herramienta_fecha = HerramientaFecha()
         self.herramienta_cripto = HerramientaCripto()
@@ -167,7 +167,7 @@ class AgenteMultiAPI:
             ),
             Tool.from_function(
                 name="PrecioAccion",
-                func=self.herramienta_noticias_financieras.obtener_precio_accion,
+                func=self.herramienta_acciones.obtener_precio_accion,
                 description=(
                     "Precio de una acción por símbolo o NOMBRE. Ej.: 'Apple' o 'AAPL'. "
                     "Devuelve precio, apertura, máximo, mínimo y hora."
