@@ -1,14 +1,12 @@
-python-telegram-bot==21.6
-python-dotenv==1.0.1
-requests==2.32.3
 
-# LangChain + Gemini (compatibles entre sí)
-langchain==0.2.16
+
+python-telegram-bot[webhooks,rate-limiter]>=20.7,<22
 langchain-google-genai==1.0.7
 google-generativeai==0.7.2
-
-yfinance==0.2.43
-#curl_cffi==0.6.2
-tzdata==2025.1
-geopy==2.4.1
-timezonefinder==6.5.5
+langchain>=0.2,<0.3
+yfinance>=0.2.40,<0.3
+geopy
+timezonefinder
+tzdata
+requests
+httpx
