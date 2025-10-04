@@ -1,0 +1,16 @@
+services:
+  - type: worker
+    name: telegram-bot
+    env: python
+    buildCommand: "pip install --upgrade pip && pip install -r requirements.txt"
+    startCommand: "python bot.py"
+    autoDeploy: true
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: WEATHER_API_KEY
+        sync: false
+      - key: AGENT_VERBOSE
+        value: "0"
