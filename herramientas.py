@@ -708,31 +708,46 @@ class HerramientaBusquedaWeb:
 
 
 class HerramientaCripto:
+    """
+    Precio de criptomonedas usando CoinGecko (free) con tolerancia a fallos.
+    - Reintentos con backoff ante 429/5xx (por request) y "cortacircuito" temporal global.
+    - Caché en memoria (TTL) de precios.
+    - Fallbacks: CryptoCompare (sin API key) y Binance (si hay par USDT).
+    """
+    BASE = os.environ.get("COINGECKO_BASE", "https://api.coingecko.com/api/v3")
 
+    def __init__(self, price_ttl: int = 30):
+        self.sess = requests.Session()
+        self.sess.headers.update({"User-Agent": "MiAgente/1.0 (+https://example.local)"})
+        self._ids_cache = {"ts": 0, "maps": None}   # refresca cada 6h
+        self._price_cache = {}                      # (coin_id, vs) -> {ts, data}
+        self.PRICE_TTL = max(5, int(price_ttl))
+        # “Cortacircuito” si CoinGecko está devolviendo 429/5xx en bucle
+        self._gecko_block_until = 0.0
 
 
     SEED_COINS = {
-        "bitcoin":        ("BTC", "Bitcoin"),
-        "ethereum":       ("ETH", "Ethereum"),
-        "tether":         ("USDT", "Tether"),
-        "binancecoin":    ("BNB", "BNB"),
-        "solana":         ("SOL", "Solana"),
-        "ripple":         ("XRP", "XRP"),
-        "usd-coin":       ("USDC", "USD Coin"),
-        "cardano":        ("ADA", "Cardano"),
-        "dogecoin":       ("DOGE","Dogecoin"),
-        "tron":           ("TRX", "TRON"),
-        "polkadot":       ("DOT", "Polkadot"),
-        "litecoin":       ("LTC", "Litecoin"),
-        "matic-network":  ("MATIC","Polygon"),
-        "bitcoin-cash":   ("BCH", "Bitcoin Cash"),
-        "chainlink":      ("LINK","Chainlink"),
-        "stellar":        ("XLM","Stellar"),
-        "uniswap":        ("UNI","Uniswap"),
-        "cosmos":         ("ATOM","Cosmos"),
-        "monero":         ("XMR","Monero"),
-        "algorand":       ("ALGO","Algorand"),
-    }
+            "bitcoin":        ("BTC", "Bitcoin"),
+            "ethereum":       ("ETH", "Ethereum"),
+            "tether":         ("USDT", "Tether"),
+            "binancecoin":    ("BNB", "BNB"),
+            "solana":         ("SOL", "Solana"),
+            "ripple":         ("XRP", "XRP"),
+            "usd-coin":       ("USDC", "USD Coin"),
+            "cardano":        ("ADA", "Cardano"),
+            "dogecoin":       ("DOGE","Dogecoin"),
+            "tron":           ("TRX", "TRON"),
+            "polkadot":       ("DOT", "Polkadot"),
+            "litecoin":       ("LTC", "Litecoin"),
+            "matic-network":  ("MATIC","Polygon"),
+            "bitcoin-cash":   ("BCH", "Bitcoin Cash"),
+            "chainlink":      ("LINK","Chainlink"),
+            "stellar":        ("XLM","Stellar"),
+            "uniswap":        ("UNI","Uniswap"),
+            "cosmos":         ("ATOM","Cosmos"),
+            "monero":         ("XMR","Monero"),
+            "algorand":       ("ALGO","Algorand"),
+        }
 
     def _seed_maps(self):
         """Construye índices in-memory a partir de SEED_COINS."""
@@ -746,18 +761,70 @@ class HerramientaCripto:
             by_name.setdefault(name.lower(), []).append(cid)
         return {"by_id": by_id, "by_symbol": by_symbol, "by_name": by_name, "id_to_symbol": id_to_symbol}
 
+
+    # ---------- utilidades ----------
+    def _sleep_backoff(self, attempt: int, retry_after: str | None) -> None:
+        import random
+        base = float(retry_after) if retry_after else min(2 ** attempt, 10)
+        time.sleep(base + random.uniform(0, 0.5))
+
+    # ---------- núcleo HTTP con backoff ----------
+    def _get(self, path: str, params: dict | None = None, max_attempts: int = 4):
+        url = f"{self.BASE}{path}"
+        last_exc = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                r = self.sess.get(url, params=params or {}, timeout=12)
+            except requests.RequestException as e:
+                last_exc = e
+                # reintenta rápido solo si hay más intentos
+                if attempt < max_attempts:
+                    self._sleep_backoff(attempt, None)
+                    continue
+                break
+
+            # Manejo de rate limit / server errors
+            if r.status_code == 429 or r.status_code >= 500:
+                # Marca bloqueo global por 60s (o el Retry-After)
+                retry_after = r.headers.get("Retry-After")
+                delay = float(retry_after) if retry_after else 60.0
+                self._gecko_block_until = time.time() + delay
+                if attempt < max_attempts:
+                    self._sleep_backoff(attempt, retry_after)
+                    continue
+                last_exc = requests.RequestException(
+                    f"HTTP {r.status_code} de CoinGecko (Rate limit/Server error)"
+                )
+                break
+
+            try:
+                return r.json()
+            except ValueError as e:
+                last_exc = e
+                if attempt < max_attempts:
+                    self._sleep_backoff(attempt, None)
+                    continue
+                break
+
+        # agotado
+        raise requests.RequestException("Rate limit o error persistente de CoinGecko.") from last_exc
+
+    # ---------- resolución de ID ----------
     def _load_ids(self, force: bool = False):
         """Devuelve mapas de resolución. Si CoinGecko está bloqueado, usa mapas semilla sin lanzar."""
         now = time.time()
 
+        # Si estamos en ventana de bloqueo global, devolver semilla
         if now < self._gecko_block_until and not force:
             if not self._ids_cache["maps"]:
                 self._ids_cache = {"ts": now, "maps": self._seed_maps()}
             return self._ids_cache["maps"]
 
+        # Si el caché sigue fresco, úsalo
         if (not force) and self._ids_cache["maps"] and (now - self._ids_cache["ts"] < 6 * 3600):
             return self._ids_cache["maps"]
 
+        # Intentar CoinGecko; si falla, NO lanzamos: guardamos semilla y marcamos bloqueo
         try:
             data = self._get("/coins/list", {"include_platform": "false"})
             maps = {"by_id": set(), "by_symbol": {}, "by_name": {}, "id_to_symbol": {}}
@@ -809,9 +876,50 @@ class HerramientaCripto:
                 cid = lst[0]
                 return cid, maps["id_to_symbol"].get(cid)
 
+        # 3) Si todo falla: intenta construir símbolo upper para fallbacks (BTC/ETH…)
         sym_guess = q.upper() if q.isalpha() and 2 <= len(q) <= 6 else None
         return None, sym_guess  # esto permite al precio usar fallbacks por símbolo
 
+    # ---------- fallbacks ----------
+    def _fallback_cc_price(self, symbol_upper: str, vs: str) -> dict | None:
+        """
+        CryptoCompare sin API key: devuelve {"price": float} o None
+        """
+        try:
+            url = "https://min-api.cryptocompare.com/data/price"
+            r = self.sess.get(url, params={"fsym": symbol_upper, "tsyms": vs.upper()}, timeout=10)
+            r.raise_for_status()
+            js = r.json()
+            val = js.get(vs.upper())
+            if isinstance(val, (int, float)):
+                return {"price": float(val), "chg": None}
+        except Exception:
+            pass
+        return None
+
+    def _fallback_binance_price(self, symbol_upper: str, vs: str) -> dict | None:
+        """
+        Binance ticker price → requiere par SYMBOL+VS. Solo intentamos VS=USD/USDT.
+        """
+        try:
+            if vs.lower() not in {"usd", "usdt"}:
+                return None
+            pair = f"{symbol_upper}USDT"
+            url = "https://api.binance.com/api/v3/ticker/price"
+            r = self.sess.get(url, params={"symbol": pair}, timeout=8)
+            if r.status_code == 400 and vs.lower() == "usd":
+                # algunos pares solo existen en USDT, ya lo estamos usando
+                return None
+            r.raise_for_status()
+            js = r.json()
+            px = js.get("price")
+            if px is not None:
+                return {"price": float(px), "chg": None}
+        except Exception:
+            pass
+        return None
+
+    # ---------- API pública ----------
     def obtener_precio_cripto(self, consulta: str, vs: str = "usd") -> str:
         s = (consulta or "").strip()
         parts = s.split()
@@ -839,6 +947,7 @@ class HerramientaCripto:
             p = None
             gecko_err = None
 
+            # 1) CoinGecko si tenemos id y no está bloqueado
             if cid and now >= self._gecko_block_until:
                 try:
                     js = self._get(
@@ -850,6 +959,7 @@ class HerramientaCripto:
                 except requests.RequestException as e:
                     gecko_err = e
 
+            # 2) Fallbacks por símbolo (si no hay id o falló CG)
             sym_try = sym_upper
             if not sym_try and cid:
                 # intenta derivar símbolo desde mapas
@@ -872,3 +982,32 @@ class HerramientaCripto:
         chg_txt = f"{chg:.2f}%" if isinstance(chg, (int, float)) else "N/D"
         display = (cid.capitalize() if cid else (sym_upper or "Cripto"))
         return f"{display} → {p['price']} {vs.upper()} (24h: {chg_txt})"
+
+    def obtener_top_criptos(self, n: int = 10, vs: str = "usd") -> str:
+        n = max(1, min(int(n), 50))
+
+        # si CoinGecko está temporalmente bloqueado, intenta saltar directo
+        if time.time() < self._gecko_block_until:
+            # no hay top estable en fallbacks → devuelve aviso breve
+            return "CoinGecko está limitando consultas ahora mismo. Intenta de nuevo en unos segundos."
+
+        try:
+            js = self._get(
+                "/coins/markets",
+                {"vs_currency": vs, "order": "market_cap_desc", "per_page": n, "page": 1, "price_change_percentage": "24h"},
+            )
+        except requests.RequestException:
+            return "CoinGecko está limitando consultas ahora mismo. Intenta de nuevo en unos segundos."
+
+        if not isinstance(js, list) or not js:
+            return "No pude obtener el top de criptomonedas."
+
+        out = [f"Top {n} criptos por capitalización ({vs.upper()}):", ""]
+        for i, it in enumerate(js, 1):
+            name = it.get("name", "N/D")
+            sym = (it.get("symbol") or "").upper()
+            px = it.get("current_price")
+            ch = it.get("price_change_percentage_24h")
+            ch_txt = f"{ch:.2f}%" if isinstance(ch, (int, float)) else "N/D"
+            out.append(f"{i}. {name} ({sym}): {px} {vs.upper()}  |  24h: {ch_txt}")
+        return "\n".join(out)
