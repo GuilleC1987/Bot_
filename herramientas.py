@@ -708,173 +708,113 @@ class HerramientaBusquedaWeb:
 
 
 class HerramientaCripto:
-    """
-    Precio de criptomonedas usando CoinGecko (free) con tolerancia a fallos.
-    - Reintentos con backoff ante 429/5xx (por request) y "cortacircuito" temporal global.
-    - Caché en memoria (TTL) de precios.
-    - Fallbacks: CryptoCompare (sin API key) y Binance (si hay par USDT).
-    """
-    BASE = os.environ.get("COINGECKO_BASE", "https://api.coingecko.com/api/v3")
 
-    def __init__(self, price_ttl: int = 30):
-        self.sess = requests.Session()
-        self.sess.headers.update({"User-Agent": "MiAgente/1.0 (+https://example.local)"})
-        self._ids_cache = {"ts": 0, "maps": None}   # refresca cada 6h
-        self._price_cache = {}                      # (coin_id, vs) -> {ts, data}
-        self.PRICE_TTL = max(5, int(price_ttl))
-        # “Cortacircuito” si CoinGecko está devolviendo 429/5xx en bucle
-        self._gecko_block_until = 0.0
 
-    # ---------- utilidades ----------
-    def _sleep_backoff(self, attempt: int, retry_after: str | None) -> None:
-        import random
-        base = float(retry_after) if retry_after else min(2 ** attempt, 10)
-        time.sleep(base + random.uniform(0, 0.5))
 
-    # ---------- núcleo HTTP con backoff ----------
-    def _get(self, path: str, params: dict | None = None, max_attempts: int = 4):
-        url = f"{self.BASE}{path}"
-        last_exc = None
-        for attempt in range(1, max_attempts + 1):
-            try:
-                r = self.sess.get(url, params=params or {}, timeout=12)
-            except requests.RequestException as e:
-                last_exc = e
-                # reintenta rápido solo si hay más intentos
-                if attempt < max_attempts:
-                    self._sleep_backoff(attempt, None)
-                    continue
-                break
+    SEED_COINS = {
+        "bitcoin":        ("BTC", "Bitcoin"),
+        "ethereum":       ("ETH", "Ethereum"),
+        "tether":         ("USDT", "Tether"),
+        "binancecoin":    ("BNB", "BNB"),
+        "solana":         ("SOL", "Solana"),
+        "ripple":         ("XRP", "XRP"),
+        "usd-coin":       ("USDC", "USD Coin"),
+        "cardano":        ("ADA", "Cardano"),
+        "dogecoin":       ("DOGE","Dogecoin"),
+        "tron":           ("TRX", "TRON"),
+        "polkadot":       ("DOT", "Polkadot"),
+        "litecoin":       ("LTC", "Litecoin"),
+        "matic-network":  ("MATIC","Polygon"),
+        "bitcoin-cash":   ("BCH", "Bitcoin Cash"),
+        "chainlink":      ("LINK","Chainlink"),
+        "stellar":        ("XLM","Stellar"),
+        "uniswap":        ("UNI","Uniswap"),
+        "cosmos":         ("ATOM","Cosmos"),
+        "monero":         ("XMR","Monero"),
+        "algorand":       ("ALGO","Algorand"),
+    }
 
-            # Manejo de rate limit / server errors
-            if r.status_code == 429 or r.status_code >= 500:
-                # Marca bloqueo global por 60s (o el Retry-After)
-                retry_after = r.headers.get("Retry-After")
-                delay = float(retry_after) if retry_after else 60.0
-                self._gecko_block_until = time.time() + delay
-                if attempt < max_attempts:
-                    self._sleep_backoff(attempt, retry_after)
-                    continue
-                last_exc = requests.RequestException(
-                    f"HTTP {r.status_code} de CoinGecko (Rate limit/Server error)"
-                )
-                break
+    def _seed_maps(self):
+        """Construye índices in-memory a partir de SEED_COINS."""
+        by_id = set(self.SEED_COINS.keys())
+        by_symbol = {}
+        by_name = {}
+        id_to_symbol = {}
+        for cid, (sym, name) in self.SEED_COINS.items():
+            id_to_symbol[cid] = sym.upper()
+            by_symbol.setdefault(sym.lower(), []).append(cid)
+            by_name.setdefault(name.lower(), []).append(cid)
+        return {"by_id": by_id, "by_symbol": by_symbol, "by_name": by_name, "id_to_symbol": id_to_symbol}
 
-            try:
-                return r.json()
-            except ValueError as e:
-                last_exc = e
-                if attempt < max_attempts:
-                    self._sleep_backoff(attempt, None)
-                    continue
-                break
-
-        # agotado
-        raise requests.RequestException("Rate limit o error persistente de CoinGecko.") from last_exc
-
-    # ---------- resolución de ID ----------
     def _load_ids(self, force: bool = False):
+        """Devuelve mapas de resolución. Si CoinGecko está bloqueado, usa mapas semilla sin lanzar."""
         now = time.time()
+
+        if now < self._gecko_block_until and not force:
+            if not self._ids_cache["maps"]:
+                self._ids_cache = {"ts": now, "maps": self._seed_maps()}
+            return self._ids_cache["maps"]
+
         if (not force) and self._ids_cache["maps"] and (now - self._ids_cache["ts"] < 6 * 3600):
             return self._ids_cache["maps"]
 
-        data = self._get("/coins/list", {"include_platform": "false"})
-        maps = {
-            "by_id": set(),
-            "by_symbol": {},
-            "by_name": {},
-            "id_to_symbol": {},
-        }
-        for it in data:
-            cid = it["id"]
-            sym = (it.get("symbol") or "").lower()
-            name = (it.get("name") or "").lower()
-            maps["by_id"].add(cid)
-            if sym:
-                maps["by_symbol"].setdefault(sym, []).append(cid)
-            if name:
-                maps["by_name"].setdefault(name, []).append(cid)
-            if cid and sym:
-                maps["id_to_symbol"][cid] = sym.upper()
-        self._ids_cache = {"ts": now, "maps": maps}
-        return maps
+        try:
+            data = self._get("/coins/list", {"include_platform": "false"})
+            maps = {"by_id": set(), "by_symbol": {}, "by_name": {}, "id_to_symbol": {}}
+            for it in data:
+                cid = it["id"]
+                sym = (it.get("symbol") or "").lower()
+                name = (it.get("name") or "").lower()
+                maps["by_id"].add(cid)
+                if sym:
+                    maps["by_symbol"].setdefault(sym, []).append(cid)
+                if name:
+                    maps["by_name"].setdefault(name, []).append(cid)
+                if cid and sym:
+                    maps["id_to_symbol"][cid] = sym.upper()
+            self._ids_cache = {"ts": now, "maps": maps}
+            return maps
+        except requests.RequestException:
+            # Marca bloqueo y usa semilla
+            self._gecko_block_until = now + 60.0
+            maps = self._seed_maps()
+            self._ids_cache = {"ts": now, "maps": maps}
+            return maps
 
     def _resolve_id(self, q: str) -> tuple[str | None, str | None]:
         """
         Devuelve (coin_id, symbol_upper) o (None, None).
+        Nunca lanza; si no puede, intenta resolver contra mapas semilla.
         """
         q = (q or "").strip().lower().lstrip("$")
         if not q:
             return None, None
-        m = self._load_ids()
 
-        if q in m["by_id"]:
-            sym = m["id_to_symbol"].get(q)
-            return q, sym
-        if q in m["by_symbol"]:
-            cid = m["by_symbol"][q][0]
-            return cid, m["id_to_symbol"].get(cid)
-        if q in m["by_name"]:
-            cid = m["by_name"][q][0]
-            return cid, m["id_to_symbol"].get(cid)
+        # 1) Usa mapas (CG o semilla) sin lanzar
+        maps = self._load_ids(force=False)
 
-        # Búsqueda parcial por nombre
-        for name, lst in m["by_name"].items():
+        # consultas directas
+        if q in maps["by_id"]:
+            return q, maps["id_to_symbol"].get(q)
+        if q in maps["by_symbol"]:
+            cid = maps["by_symbol"][q][0]
+            return cid, maps["id_to_symbol"].get(cid)
+        if q in maps["by_name"]:
+            cid = maps["by_name"][q][0]
+            return cid, maps["id_to_symbol"].get(cid)
+
+        # 2) Búsqueda parcial por nombre
+        for name, lst in maps["by_name"].items():
             if q in name:
                 cid = lst[0]
-                return cid, m["id_to_symbol"].get(cid)
-        return None, None
+                return cid, maps["id_to_symbol"].get(cid)
 
-    # ---------- fallbacks ----------
-    def _fallback_cc_price(self, symbol_upper: str, vs: str) -> dict | None:
-        """
-        CryptoCompare sin API key: devuelve {"price": float} o None
-        """
-        try:
-            url = "https://min-api.cryptocompare.com/data/price"
-            r = self.sess.get(url, params={"fsym": symbol_upper, "tsyms": vs.upper()}, timeout=10)
-            r.raise_for_status()
-            js = r.json()
-            val = js.get(vs.upper())
-            if isinstance(val, (int, float)):
-                return {"price": float(val), "chg": None}
-        except Exception:
-            pass
-        return None
+        sym_guess = q.upper() if q.isalpha() and 2 <= len(q) <= 6 else None
+        return None, sym_guess  # esto permite al precio usar fallbacks por símbolo
 
-    def _fallback_binance_price(self, symbol_upper: str, vs: str) -> dict | None:
-        """
-        Binance ticker price → requiere par SYMBOL+VS. Solo intentamos VS=USD/USDT.
-        """
-        try:
-            if vs.lower() not in {"usd", "usdt"}:
-                return None
-            pair = f"{symbol_upper}USDT"
-            url = "https://api.binance.com/api/v3/ticker/price"
-            r = self.sess.get(url, params={"symbol": pair}, timeout=8)
-            if r.status_code == 400 and vs.lower() == "usd":
-                # algunos pares solo existen en USDT, ya lo estamos usando
-                return None
-            r.raise_for_status()
-            js = r.json()
-            px = js.get("price")
-            if px is not None:
-                return {"price": float(px), "chg": None}
-        except Exception:
-            pass
-        return None
-
-    # ---------- API pública ----------
     def obtener_precio_cripto(self, consulta: str, vs: str = "usd") -> str:
-        """
-        Entrada flexible:
-          - "btc" / "bitcoin"
-          - "eth usd" (cambia vs)
-          - También admite "eth vs: eur"
-        """
         s = (consulta or "").strip()
         parts = s.split()
-        # detectar 'vs' al final o patrón vs:
         import re as _re
         m = _re.search(r"\bvs\s*[:=]\s*([a-zA-Z]{2,5})\b", s, _re.I)
         if m:
@@ -887,80 +827,48 @@ class HerramientaCripto:
             coin = s
 
         cid, sym_upper = self._resolve_id(coin)
-        if not cid:
+        if not cid and not sym_upper:
             return f"No pude reconocer la cripto '{consulta}'. Prueba con 'bitcoin', 'btc', 'ethereum', 'eth'."
 
-        key = (cid, vs.lower())
+        key = ((cid or f"sym:{sym_upper}"), vs.lower())
         now = time.time()
-
-        # caché caliente
         hit = self._price_cache.get(key)
         if hit and now - hit["ts"] < self.PRICE_TTL:
             p = hit["data"]
-            chg = p.get("chg")
-            chg_txt = f"{chg:.2f}%" if isinstance(chg, (int, float)) else "N/D"
-            return f"{cid.capitalize()} → {p['price']} {vs.upper()} (24h: {chg_txt})"
+        else:
+            p = None
+            gecko_err = None
 
-        # si CoinGecko está “bloqueado” recientemente, salta directo a fallback
-        use_fallbacks_first = now < self._gecko_block_until
+            if cid and now >= self._gecko_block_until:
+                try:
+                    js = self._get(
+                        "/simple/price",
+                        {"ids": cid, "vs_currencies": vs, "include_24hr_change": "true"},
+                    )
+                    if isinstance(js, dict) and cid in js and vs in js[cid]:
+                        p = {"price": js[cid][vs], "chg": js[cid].get(f"{vs}_24h_change")}
+                except requests.RequestException as e:
+                    gecko_err = e
 
-        p = None
-        gecko_error = None
-        if not use_fallbacks_first:
-            try:
-                js = self._get(
-                    "/simple/price",
-                    {"ids": cid, "vs_currencies": vs, "include_24hr_change": "true"},
-                )
-                if isinstance(js, dict) and cid in js and vs in js[cid]:
-                    p = {"price": js[cid][vs], "chg": js[cid].get(f"{vs}_24h_change")}
-            except requests.RequestException as e:
-                gecko_error = e  # para decidir mensaje si también fallan fallbacks
+            sym_try = sym_upper
+            if not sym_try and cid:
+                # intenta derivar símbolo desde mapas
+                maps = self._ids_cache["maps"] or self._seed_maps()
+                sym_try = (maps.get("id_to_symbol") or {}).get(cid)
 
-        # fallbacks si no tenemos precio aún
-        if p is None:
-            if sym_upper:
-                p = self._fallback_cc_price(sym_upper, vs)
-            if p is None and sym_upper:
-                p = self._fallback_binance_price(sym_upper, vs)
+            if p is None and sym_try:
+                p = self._fallback_cc_price(sym_try, vs)
+            if p is None and sym_try:
+                p = self._fallback_binance_price(sym_try, vs)
 
-        if p is None:
-            # último recurso: mensaje claro (incluye si había rate limit)
-            if gecko_error:
-                return "CoinGecko está limitando o con error ahora mismo y los proveedores de respaldo no respondieron. Intenta más tarde."
-            return "No pude obtener el precio ahora mismo. Intenta más tarde."
+            if p is None:
+                if gecko_err or (now < self._gecko_block_until):
+                    return "CoinGecko está limitando o con error ahora mismo y los proveedores de respaldo no respondieron. Intenta más tarde."
+                return "No pude obtener el precio ahora mismo. Intenta más tarde."
 
-        # guarda caché y responde
-        self._price_cache[key] = {"ts": now, "data": p}
+            self._price_cache[key] = {"ts": now, "data": p}
+
         chg = p.get("chg")
         chg_txt = f"{chg:.2f}%" if isinstance(chg, (int, float)) else "N/D"
-        return f"{cid.capitalize()} → {p['price']} {vs.upper()} (24h: {chg_txt})"
-
-    def obtener_top_criptos(self, n: int = 10, vs: str = "usd") -> str:
-        n = max(1, min(int(n), 50))
-
-        # si CoinGecko está temporalmente bloqueado, intenta saltar directo
-        if time.time() < self._gecko_block_until:
-            # no hay top estable en fallbacks → devuelve aviso breve
-            return "CoinGecko está limitando consultas ahora mismo. Intenta de nuevo en unos segundos."
-
-        try:
-            js = self._get(
-                "/coins/markets",
-                {"vs_currency": vs, "order": "market_cap_desc", "per_page": n, "page": 1, "price_change_percentage": "24h"},
-            )
-        except requests.RequestException:
-            return "CoinGecko está limitando consultas ahora mismo. Intenta de nuevo en unos segundos."
-
-        if not isinstance(js, list) or not js:
-            return "No pude obtener el top de criptomonedas."
-
-        out = [f"Top {n} criptos por capitalización ({vs.upper()}):", ""]
-        for i, it in enumerate(js, 1):
-            name = it.get("name", "N/D")
-            sym = (it.get("symbol") or "").upper()
-            px = it.get("current_price")
-            ch = it.get("price_change_percentage_24h")
-            ch_txt = f"{ch:.2f}%" if isinstance(ch, (int, float)) else "N/D"
-            out.append(f"{i}. {name} ({sym}): {px} {vs.upper()}  |  24h: {ch_txt}")
-        return "\n".join(out)
+        display = (cid.capitalize() if cid else (sym_upper or "Cripto"))
+        return f"{display} → {p['price']} {vs.upper()} (24h: {chg_txt})"
