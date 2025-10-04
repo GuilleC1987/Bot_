@@ -1,16 +1,17 @@
+# agente.py
+from __future__ import annotations
 
-
+import os
 import re
 from typing import Any
 
-import requests
 from datetime import datetime, timezone
+import requests
 
 from langchain.agents import initialize_agent, AgentType
 from langchain.tools import Tool
 from langchain.memory import ConversationBufferMemory
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.callbacks.base import BaseCallbackHandler
 
 from prompts import get_system_prompt, get_conversation_prompt
 from herramientas import (
@@ -20,17 +21,21 @@ from herramientas import (
     HerramientaBusquedaWeb,
     HerramientaCripto,
 )
-import os
 
+# Silencio de librerías ruidosas (opcional)
 os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
 os.environ.setdefault("GRPC_TRACE", "")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
+
 def _ensure_ca_bundle_safe_path():
+    """
+    En Windows con rutas con acentos/espacios, fija CA bundles.
+    En Linux/Render no hace daño (no hace nada si no aplica).
+    """
     try:
         import certifi, shutil
         cafile = certifi.where()
-        # Si la ruta tiene acentos o espacios, copia a C:\certs\cacert.pem
         if any(ord(ch) > 127 for ch in cafile) or " " in cafile:
             target = r"C:\certs\cacert.pem"
             os.makedirs(r"C:\certs", exist_ok=True)
@@ -50,18 +55,19 @@ def _ensure_ca_bundle_safe_path():
     except Exception:
         pass
 
+
 _ensure_ca_bundle_safe_path()
 
 
 class AgenteMultiAPI:
     """
-    Asistente que integra múltiples APIs (clima, noticias/mercados, búsqueda web, fecha).
+    Asistente que integra múltiples APIs (clima, mercados, búsqueda web, fecha, cripto).
     """
 
     def __init__(self):
         self.nombre = "Asistente Personal"
 
-        # Herramientas externas
+        # Herramientas externas (de herramientas.py)
         self.herramienta_clima = HerramientaClima(os.getenv("WEATHER_API_KEY"))
         self.herramienta_noticias_financieras = HerramientaMercadosYahoo()
         self.herramienta_busqueda = HerramientaBusquedaWeb()
@@ -84,7 +90,7 @@ class AgenteMultiAPI:
         # Tools para LangChain
         self.herramientas = self._crear_herramientas_langchain()
 
-        # Prompts
+        # Prompt del sistema
         base_system = get_system_prompt().format(nombre=self.nombre)
 
         # Agente conversacional
@@ -93,7 +99,7 @@ class AgenteMultiAPI:
             llm=self.llm,
             agent=AgentType.CONVERSATIONAL_REACT_DESCRIPTION,
             memory=self.memoria,
-            verbose=False,                   # ↓ menos ruido en consola
+            verbose=False,
             handle_parsing_errors=True,
             max_iterations=4,
             agent_kwargs={
@@ -102,11 +108,11 @@ class AgenteMultiAPI:
             },
         )
 
-
+    # ------------------- Wrappers string-only -------------------
     def _tool_fecha_desde_prompt_str(self, entrada: str) -> str:
         """
-        Tool 'string-only' para fecha por ciudad.
-        Puedes incluir 'formato: X' en el texto (X ∈ completo|fecha|hora|iso|simple).
+        Fecha/hora por ciudad detectada en el texto.
+        Permite 'formato: completo|fecha|hora|iso|simple'.
         """
         s = (entrada or "").strip()
         m = re.search(r"formato\s*[:=]\s*(completo|fecha|hora|iso|simple)", s, re.I)
@@ -115,7 +121,7 @@ class AgenteMultiAPI:
             return self.herramienta_fecha.obtener_fecha_desde_prompt(s, formato=formato)
         except Exception as e:
             return f"⚠️ Error al obtener fecha desde prompt: {e}"
-    
+
     def _tool_cripto_top(self, entrada: str) -> str:
         """
         Lista el top N cripto por market cap.
@@ -124,39 +130,34 @@ class AgenteMultiAPI:
         n = 10
         s = (entrada or "").strip()
         if s:
-            import re
             m = re.search(r"(\d+)", s)
             if m:
                 try:
                     n = max(1, min(int(m.group(1)), 50))
                 except Exception:
                     n = 10
-        return self.herramienta_cripto.obtener_top_cripto(cantidad=n, vs="usd")
+        # ✅ herramientas.py expone obtener_top_criptos(n:int, vs:str='usd')
+        return self.herramienta_cripto.obtener_top_criptos(n=n, vs="usd")
 
     def _tool_cripto_precio(self, entrada: str) -> str:
         """
         Precio de una cripto específica. Ej: 'bitcoin', 'eth', 'sol'.
-        También puedes indicar moneda fiat: 'eth vs: eur'
+        Puedes indicar moneda: 'eth vs: eur' o 'btc usd'.
         """
         s = (entrada or "").strip()
         if not s:
             return "Indica la criptomoneda (ej. 'bitcoin', 'eth', 'sol')."
-        import re
-        m = re.search(r"vs\s*[:=]\s*([a-zA-Z]+)", s)
+        m = re.search(r"vs\s*[:=]\s*([a-zA-Z]{2,5})", s)
         vs = (m.group(1).lower() if m else "usd")
+        # ✅ herramientas.py expone obtener_precio_cripto(consulta:str, vs:str='usd')
         return self.herramienta_cripto.obtener_precio_cripto(s, vs=vs)
 
-
-
-    # ------------------------------------------------------------
-
+    # ------------------- Construcción de Tools -------------------
     def _crear_herramientas_langchain(self) -> list:
         """
         Construye la lista de Tools para el agente.
         TODAS string-only (infer_schema=False) para evitar 'Missing some input keys'.
         """
-        from langchain.tools import Tool
-
         return [
             Tool.from_function(
                 name="ConsultarClima",
@@ -187,7 +188,7 @@ class AgenteMultiAPI:
             ),
             Tool.from_function(
                 name="ObtenerFechaDesdePrompt",
-                func=self._tool_fecha_desde_prompt_str,  # wrapper string-only
+                func=self._tool_fecha_desde_prompt_str,
                 description=(
                     "Fecha/hora local detectando ciudad en el texto; "
                     "puedes incluir 'formato: completo|fecha|hora|iso|simple'."
@@ -197,19 +198,19 @@ class AgenteMultiAPI:
             # --- CRIPTO ---
             Tool.from_function(
                 name="ObtenerPrecioCripto",
-                func=self._tool_cripto_precio,  # wrapper string-only
+                func=self._tool_cripto_precio,
                 description="Precio cripto. Ej.: 'bitcoin', 'btc', 'eth usd', 'sol vs: eur'.",
                 infer_schema=False,
             ),
             Tool.from_function(
                 name="ObtenerTopCripto",
-                func=self._tool_cripto_top,  # wrapper string-only
+                func=self._tool_cripto_top,
                 description="Top N criptos por market cap. Input opcional: número (default 10).",
                 infer_schema=False,
             ),
         ]
 
-    
+    # ------------------- API pública -------------------
     def procesar_consulta(self, consulta: str) -> str:
         """Procesa la consulta con el agente y devuelve el texto resultante."""
         try:
@@ -227,4 +228,3 @@ class AgenteMultiAPI:
             print(f"Nombre: {herramienta.name}")
             print(f"Descripción: {herramienta.description}")
             print("-" * 20)
-
