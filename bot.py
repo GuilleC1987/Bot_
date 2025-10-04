@@ -8,13 +8,18 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 
 
+
+
 if os.name == "nt":
     os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
-from dotenv import load_dotenv
-load_dotenv()  # .env local
-
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+    
 # Silenciar deprecations verbosas de LangChain
 try:
     from langchain_core._api import LangChainDeprecationWarning
