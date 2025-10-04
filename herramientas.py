@@ -386,102 +386,111 @@ class HerramientaMercadosYahoo:
             return None
 
     def _stooq_quote(self, symbol: str) -> dict | None:
-        try:
-            s = symbol.lower()
-            url = f"https://stooq.com/q/l/?s={s}&f=sd2t2ohlcv&h&e=csv"
-            r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-            r.raise_for_status()
-            rows = list(csv.DictReader(StringIO(r.text.strip())))
-            if not rows:
-                return None
-            row = rows[0]
-            if row.get("Close") in ("N/D", "N/A", None, ""):
-                return None
-
-            def f(x):
-                try:
-                    return float(x)
-                except Exception:
-                    return None
-
-            return {
-                "c": f(row.get("Close")),
-                "o": f(row.get("Open")),
-                "h": f(row.get("High")),
-                "l": f(row.get("Low")),
-                "pc": None,
-                "t": int(datetime.now(timezone.utc).timestamp()),
-            }
-        except Exception:
+        """
+        Último recurso: Stooq (CSV). Intentamos con 'symbol' y 'symbol.us'.
+        """
+        try_syms = []
+        s0 = (symbol or "").lower()
+        if not s0:
             return None
+        try_syms.append(s0)
+        if not s0.endswith(".us"):
+            try_syms.append(f"{s0}.us")
+
+        for s in try_syms:
+            try:
+                url = f"https://stooq.com/q/l/?s={s}&f=sd2t2ohlcv&h&e=csv"
+                r = requests.get(url, timeout=10, headers={"User-Agent":"Mozilla/5.0"})
+                r.raise_for_status()
+                content = r.text.strip()
+                rows = list(csv.DictReader(StringIO(content)))
+                if not rows:
+                    continue
+                row = rows[0]
+                if row.get("Close") in ("N/D", "N/A", None, ""):
+                    continue
+
+                def f(x):
+                    try: return float(x)
+                    except Exception: return None
+
+                out = {
+                    "c": f(row.get("Close")),
+                    "o": f(row.get("Open")),
+                    "h": f(row.get("High")),
+                    "l": f(row.get("Low")),
+                    "pc": None,
+                    "t": int(datetime.now(timezone.utc).timestamp()),
+                }
+                if out["c"] is None:
+                    continue
+                return out
+            except Exception:
+                continue
+        return None
 
     # ------------------------ Pública ------------------------
     def obtener_precio_accion(self, symbol_o_nombre: str) -> str:
-        sym = self._resolver_yahoo_simbolo(symbol_o_nombre)
-        if not sym:
-            return f"No pude resolver el símbolo para '{symbol_o_nombre}'. Prueba con el ticker (p. ej., TSLA)."
+        """
+        Obtiene precio SIN yfinance (más estable en Render):
+        1) Yahoo Quote API
+        2) Stooq (CSV) como fallback
+        """
+        q = self._sanitize(symbol_o_nombre)              # quita '$', normaliza BRK.B -> BRK-B, etc.
+        if not q:
+            return "Debes indicar un símbolo o nombre (ej. AAPL, Apple)."
 
-        # 1) yfinance.fast_info (no pasar session)
-        c = o = h = l = pc = None
-        try:
-            t = yf.Ticker(sym)
-            fi = getattr(t, "fast_info", None)
-            if fi:
-                c = getattr(fi, "last_price", None)
-                o = getattr(fi, "open", None)
-                h = getattr(fi, "day_high", None)
-                l = getattr(fi, "day_low", None)
-                pc = getattr(fi, "previous_close", None)
-        except Exception:
-            pass
+        sym = self._resolver_yahoo_simbolo(q) or q       # resuelve nombre→ticker si es posible
 
-        if c is None:
-            q = self._yahoo_quote_api(sym)
-            if q:
-                c, o, h, l, pc = q["c"], q["o"], q["h"], q["l"], q["pc"]
-                ts = q["t"]
-            else:
-                ts = int(time.time())
-        else:
-            ts = int(time.time())
+        # --- 1) Yahoo Quote API ---
+        qd = self._yahoo_quote_api(sym)
+        if qd:
+            ts = qd["t"] or int(time.time())
+            return (
+                f"=== {sym} ===\n"
+                f"Precio actual: {qd['c']}\n"
+                f"Apertura:     {qd['o'] if qd['o'] is not None else 'N/D'}\n"
+                f"Máximo día:   {qd['h'] if qd['h'] is not None else 'N/D'}\n"
+                f"Mínimo día:   {qd['l'] if qd['l'] is not None else 'N/D'}\n"
+                f"Cierre prev.: {qd['pc'] if qd['pc'] is not None else 'N/D'}\n"
+                f"Hora:         {self._fmt_epoch(ts)}"
+            )
 
-        if c is None:
-            q2 = self._stooq_quote(sym)
-            if q2:
-                c, o, h, l, pc, ts = q2["c"], q2["o"], q2["h"], q2["l"], q2["pc"], q2["t"]
+        # --- 2) Stooq fallback ---
+        q2 = self._stooq_quote(sym)
+        if q2:
+            ts = q2["t"]
+            return (
+                f"=== {sym} (stooq) ===\n"
+                f"Precio actual: {q2['c']}\n"
+                f"Apertura:     {q2['o'] if q2['o'] is not None else 'N/D'}\n"
+                f"Máximo día:   {q2['h'] if q2['h'] is not None else 'N/D'}\n"
+                f"Mínimo día:   {q2['l'] if q2['l'] is not None else 'N/D'}\n"
+                f"Cierre prev.: N/D\n"
+                f"Hora:         {self._fmt_epoch(ts)}"
+            )
 
-        if c is None:
-            return f"No hay datos de precio para {sym} ahora mismo."
+        return f"No pude obtener precio para {sym} ahora mismo."
 
-        return (
-            f"=== {sym} ===\n"
-            f"Precio actual: {c}\n"
-            f"Apertura:     {o if o is not None else 'N/D'}\n"
-            f"Máximo día:   {h if h is not None else 'N/D'}\n"
-            f"Mínimo día:   {l if l is not None else 'N/D'}\n"
-            f"Cierre prev.: {pc if pc is not None else 'N/D'}\n"
-            f"Hora:         {self._fmt_epoch(ts)}"
-        )
 
     def obtener_velas(self, symbol: str, resolution: str = "1m", dias: int = 1):
         q = self._sanitize(symbol)
         sym = self._resolver_yahoo_simbolo(q) or q
 
-        interval_map = {"1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m", "60m": "60m", "D": "1d", "1d": "1d"}
-        interval = interval_map.get(resolution, "1m")
-        period = f"{dias}d" if interval != "1m" or dias > 1 else "1d"
-
-        df = yf.download(tickers=sym, period=period, interval=interval, progress=False, auto_adjust=False)
-        if df is None or df.empty:
-            return f"No hay datos de velas para {sym}."
-        o = df["Open"].tolist()
-        h = df["High"].tolist()
-        l = df["Low"].tolist()
-        c = df["Close"].tolist()
-        v = df["Volume"].tolist()
-        t = [int(pd_ts.timestamp()) for pd_ts in df.index.to_pydatetime()]
-        return {"s": "ok", "t": t, "o": o, "h": h, "l": l, "c": c, "v": v}
-
+        try:
+            import yfinance as yf
+            interval_map = {"1m":"1m","5m":"5m","15m":"15m","30m":"30m","60m":"60m","D":"1d","1d":"1d"}
+            interval = interval_map.get(resolution, "1m")
+            period = f"{dias}d" if interval != "1m" or dias > 1 else "1d"
+            df = yf.download(tickers=sym, period=period, interval=interval, progress=False, auto_adjust=False)
+            if df is None or df.empty:
+                return f"No hay datos de velas para {sym}."
+            o = df["Open"].tolist(); h = df["High"].tolist(); l = df["Low"].tolist()
+            c = df["Close"].tolist(); v = df["Volume"].tolist()
+            t = [int(pd_ts.timestamp()) for pd_ts in df.index.to_pydatetime()]
+            return {"s":"ok","t":t,"o":o,"h":h,"l":l,"c":c,"v":v}
+        except Exception as e:
+            return f"No pude obtener velas para {sym}: {e}"
 
 # ============================================================
 #                       BÚSQUEDA WEB
