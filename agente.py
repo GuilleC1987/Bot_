@@ -144,7 +144,7 @@ class AgenteMultiAPI:
         import re
         m = re.search(r"vs\s*[:=]\s*([a-zA-Z]+)", s)
         vs = (m.group(1).lower() if m else "usd")
-        return self.herramienta_cripto.obtener_precio_cripto(s, vs=vs)
+        return self.herramienta_cripto.obtener_precio(s, vs=vs)
 
 
 
