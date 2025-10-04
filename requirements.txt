@@ -1,11 +1,14 @@
-python-telegram-bot==20.8
-python-dotenv>=1.0.1
-requests>=2.32.3
-yfinance>=0.2.43
-curl_cffi>=0.6.0 ; platform_system != "Windows"
-langchain>=0.2.16
-langchain-google-genai>=2.0.4
-google-generativeai>=0.8.3
-tzdata>=2024.1
-timezonefinder>=6.5.2
-geopy>=2.4.1
+python-telegram-bot==21.6
+python-dotenv==1.0.1
+requests==2.32.3
+
+# LangChain + Gemini 
+langchain==0.2.16
+langchain-google-genai==1.0.7
+google-generativeai==0.8.3
+
+yfinance==0.2.43
+curl_cffi==0.6.2
+tzdata==2025.1
+geopy==2.4.1
+timezonefinder==6.5.5
