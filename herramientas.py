@@ -432,6 +432,8 @@ class HerramientaCripto:
     """
     BASE = os.environ.get("COINGECKO_BASE", COINGECKO_BASE_URL)
 
+    
+
     def __init__(self, price_ttl: int = 30):
         self.sess = requests.Session()
         self.sess.headers.update({"User-Agent": "MiAgente/1.0 (+https://example.local)"})
@@ -440,6 +442,7 @@ class HerramientaCripto:
         self.PRICE_TTL = max(5, int(price_ttl))
         self._gecko_block_until = 0.0
 
+            
     # ----- Semillas mínimas para resolver símbolos comunes -----
     SEED_COINS = {
         "bitcoin": ("BTC", "Bitcoin"),
@@ -565,11 +568,55 @@ class HerramientaCripto:
         sym_guess = q.upper() if q.isalpha() and 2 <= len(q) <= 6 else None
         return None, sym_guess
 
+    def _get_quick(self, path: str, params: dict | None = None, timeout: float = 5.0):
+        url = f"{self.BASE}{path}"
+        r = self.sess.get(url, params=params or {}, timeout=timeout)
+        # evitamos backoff largo: si rate-limit/5xx, fallamos de inmediato
+        if r.status_code == 429 or r.status_code >= 500:
+            raise requests.RequestException(f"HTTP {r.status_code} de CoinGecko (quick)")
+        r.raise_for_status()
+        return r.json()
+
+
+    def _resolve_id_fast(self, q: str) -> tuple[str | None, str | None]:
+        """
+        Devuelve (coin_id, SYMBOL) usando solo mapas locales (seed); NO llama a la red.
+        Si no encuentra, devuelve (None, símbolo estimado) para usar fallbacks por símbolo.
+        """
+        q = (q or "").strip().lower().lstrip("$")
+        if not q:
+            return None, None
+
+        seed = self._seed_maps()
+        if q in seed["by_id"]:
+            return q, seed["id_to_symbol"].get(q)
+
+        if q in seed["by_symbol"]:
+            cid = seed["by_symbol"][q][0]
+            return cid, seed["id_to_symbol"].get(cid)
+
+        if q in seed["by_name"]:
+            cid = seed["by_name"][q][0]
+            return cid, seed["id_to_symbol"].get(cid)
+
+        for name, lst in seed["by_name"].items():
+            if q in name:
+                cid = lst[0]
+                return cid, seed["id_to_symbol"].get(cid)
+
+        # no seed → intenta símbolo estimado (p. ej. "ada" → ADA)
+        sym_guess = q.upper() if q.isalpha() and 2 <= len(q) <= 6 else None
+        return None, sym_guess
+
+
+
+
     # ----------------------- Fallbacks -----------------------
     def _fallback_cc_price(self, symbol_upper: str, vs: str) -> dict | None:
+        """CryptoCompare sin API key: rápido y sin reintentos."""
         try:
             url = "https://min-api.cryptocompare.com/data/price"
-            r = self.sess.get(url, params={"fsym": symbol_upper, "tsyms": vs.upper()}, timeout=10)
+            r = self.sess.get(url, params={"fsym": symbol_upper, "tsyms": vs.upper()}, timeout=4)
             r.raise_for_status()
             js = r.json()
             val = js.get(vs.upper())
@@ -580,12 +627,14 @@ class HerramientaCripto:
         return None
 
     def _fallback_binance_price(self, symbol_upper: str, vs: str) -> dict | None:
+        """Binance solo si VS=USD/USDT. Timeout corto."""
         try:
             if vs.lower() not in {"usd", "usdt"}:
                 return None
             pair = f"{symbol_upper}USDT"
             url = "https://api.binance.com/api/v3/ticker/price"
-            r = self.sess.get(url, params={"symbol": pair}, timeout=8)
+            r = self.sess.get(url, params={"symbol": pair}, timeout=4)
+            # algunos pares solo existen en USDT; si VS=USD igual usamos USDT
             r.raise_for_status()
             js = r.json()
             px = js.get("price")
@@ -609,40 +658,48 @@ class HerramientaCripto:
         else:
             coin = s
 
-        cid, sym_upper = self._resolve_id(coin)
+        # ⚡ ultra-rápido: sin red
+        cid, sym_upper = self._resolve_id_fast(coin)
         if not cid and not sym_upper:
             return f"No pude reconocer la cripto '{consulta}'. Prueba con 'bitcoin', 'btc', 'ethereum', 'eth'."
 
         key = ((cid or f"sym:{sym_upper}"), vs.lower())
         now = time.time()
+
+        # caché
         hit = self._price_cache.get(key)
         if hit and now - hit["ts"] < self.PRICE_TTL:
             p = hit["data"]
         else:
             p = None
-            gecko_err = None
 
-            if cid and now >= self._gecko_block_until:
-                try:
-                    js = self._get("/simple/price", {"ids": cid, "vs_currencies": vs, "include_24hr_change": "true"})
-                    if isinstance(js, dict) and cid in js and vs in js[cid]:
-                        p = {"price": js[cid][vs], "chg": js[cid].get(f"{vs}_24h_change")}
-                except requests.RequestException as e:
-                    gecko_err = e
-
+            # 1) PRIMERO proveedores rápidos (sin backoff)
             sym_try = sym_upper
             if not sym_try and cid:
-                maps = self._ids_cache["maps"] or self._seed_maps()
+                # derivar símbolo del seed map (sin red)
+                maps = self._seed_maps()
                 sym_try = (maps.get("id_to_symbol") or {}).get(cid)
 
+            if sym_try:
+                p = self._fallback_cc_price(sym_try, vs) or p
             if p is None and sym_try:
-                p = self._fallback_cc_price(sym_try, vs)
-            if p is None and sym_try:
-                p = self._fallback_binance_price(sym_try, vs)
+                p = self._fallback_binance_price(sym_try, vs) or p
+
+            # 2) SOLO si la moneda está en el seed (tenemos cid), intenta CoinGecko rápido (1 intento)
+            if p is None and cid and time.time() >= self._gecko_block_until:
+                try:
+                    js = self._get_quick(
+                        "/simple/price",
+                        {"ids": cid, "vs_currencies": vs, "include_24hr_change": "true"},
+                        timeout=5.0,
+                    )
+                    if isinstance(js, dict) and cid in js and vs in js[cid]:
+                        p = {"price": js[cid][vs], "chg": js[cid].get(f"{vs}_24h_change")}
+                except requests.RequestException:
+                    # micro-bloqueo para no insistir a CG durante unos segundos
+                    self._gecko_block_until = time.time() + 20
 
             if p is None:
-                if gecko_err or (now < self._gecko_block_until):
-                    return "CoinGecko está limitando o con error ahora mismo y los proveedores de respaldo no respondieron. Intenta más tarde."
                 return "No pude obtener el precio ahora mismo. Intenta más tarde."
 
             self._price_cache[key] = {"ts": now, "data": p}
@@ -662,6 +719,5 @@ class HerramientaCripto:
                     n = max(1, min(int(m.group(1)), 50))
                 except Exception:
                     n = 10
-        # Llama al método correcto (con 's' y argumento 'n')
         return self.herramienta_cripto.obtener_top_criptos(n=n, vs="usd")
 
