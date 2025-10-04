@@ -1,14 +1,23 @@
-
 # bot.py
 import os
+import warnings
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# Render es Linux; las variables de gRPC/TF sólo molestan en Windows.
+# ---- Solo para Windows local; en Render (Linux) no afecta ----
 if os.name == "nt":
     os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv()  # .env local
+
+# Silenciar deprecations verbosas de LangChain si aparecen
+try:
+    from langchain_core._api import LangChainDeprecationWarning
+    warnings.filterwarnings("ignore", category=LangChainDeprecationWarning)
+except Exception:
+    warnings.filterwarnings("ignore", category=DeprecationWarning, module="langchain")
 
 import asyncio
 from functools import partial
@@ -16,23 +25,20 @@ import logging
 
 from telegram import Update
 from telegram.constants import ChatAction
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+
+# AIORateLimiter (opcional). Si no está instalado, continuamos sin él.
+AIORateLimiter = None
+try:
+    from telegram.ext import AIORateLimiter as _AIORateLimiter
+    AIORateLimiter = _AIORateLimiter
+except Exception as e:
+    logging.getLogger("bot").warning(
+        f"AIORateLimiter no disponible ({e}). Continuando sin rate limiter…"
+    )
 
 # ====== IMPORTA TU AGENTE ======
 from agente import AgenteMultiAPI
-
-# ====== LOGGING ======
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
-log = logging.getLogger("bot")
 
 # ====== CONFIG ======
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -40,7 +46,7 @@ if not TELEGRAM_TOKEN:
     raise RuntimeError("Falta TELEGRAM_TOKEN en variables de entorno (.env o sistema)")
 
 if not os.environ.get("GOOGLE_API_KEY"):
-    log.warning("WARN: Falta GOOGLE_API_KEY; tu agente fallará si la requiere.")
+    print("WARN: Falta GOOGLE_API_KEY; tu agente fallará si la requiere.")
 
 # Un “pool” simple de sesiones por chat para mantener memoria por usuario
 SESSIONS: dict[int, AgenteMultiAPI] = {}
@@ -52,7 +58,7 @@ def get_agent(chat_id: int) -> AgenteMultiAPI:
     """Devuelve un agente por chat; crea uno nuevo si no existe."""
     if chat_id not in SESSIONS:
         SESSIONS[chat_id] = AgenteMultiAPI()
-        FIRST_STEP_PENDING[chat_id] = True
+        FIRST_STEP_PENDING[chat_id] = True  # nuevo chat inicia bloqueado
     return SESSIONS[chat_id]
 
 def set_first_step(chat_id: int, value: bool) -> None:
@@ -63,7 +69,6 @@ def needs_first_step(chat_id: int) -> bool:
 
 def split_telegram(text: str, max_len: int = 4000):
     """Telegram limita ~4096 chars. Partimos en trozos seguros."""
-    text = "" if text is None else str(text)
     out = []
     while len(text) > max_len:
         cut = text.rfind("\n", 0, max_len)
@@ -88,16 +93,37 @@ HELP_TEXT = (
     "Tip: envía cualquier pregunta y te respondo. Escribe 'exit' para terminar."
 )
 
-# ====== HANDLERS ======
+# ====== MINI HEALTH SERVER PARA RENDER ======
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        # /, /health, /live → 200 OK
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, format, *args):
+        # Evita ruido en logs
+        return
+
+def start_health_server():
+    """Inicia un HTTP server simple para que Render detecte el puerto abierto."""
+    port = int(os.environ.get("PORT", "10000"))  # Render inyecta PORT en web services
+    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+    logging.getLogger("bot").info(f"Health server escuchando en 0.0.0.0:{port}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+# ====== HANDLERS TELEGRAM ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /start: lo tratamos como si el usuario ya hubiera digitado start."""
     chat_id = update.effective_chat.id
     get_agent(chat_id)
     set_first_step(chat_id, False)
     await update.message.reply_text(SALUDO_ESPECIAL)
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /help."""
     chat_id = update.effective_chat.id
     get_agent(chat_id)
     await update.message.reply_text(HELP_TEXT)
@@ -119,7 +145,6 @@ async def reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     agent = get_agent(chat_id)
 
-    # Salidas rápidas
     if low in {"exit", "salir", "/exit"}:
         await update.message.reply_text("Adiós, gracias por usar el asistente.")
         return
@@ -128,7 +153,6 @@ async def reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(HELP_TEXT)
         return
 
-    # Primer paso: hasta que digite start/star
     if needs_first_step(chat_id):
         if low in {"start", "star"}:
             set_first_step(chat_id, False)
@@ -137,13 +161,11 @@ async def reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(INSTRUCCION_START)
         return
 
-    # “Reinicio amable” del saludo
     if low in {"start", "star", "/start"}:
         set_first_step(chat_id, False)
         await update.message.reply_text(SALUDO_ESPECIAL)
         return
 
-    # ---- Llamada al LLM (invoke con clave "input") ----
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     loop = asyncio.get_running_loop()
     try:
@@ -151,31 +173,28 @@ async def reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         resp = await loop.run_in_executor(None, call)
         result = resp["output"] if isinstance(resp, dict) and "output" in resp else str(resp)
     except Exception as e:
-        log.exception("Fallo al invocar el agente")
         result = f"⚠️ Error al invocar el agente: {e}"
 
-    for chunk in split_telegram(result):
+    for chunk in split_telegram(str(result)):
         await update.message.reply_text(chunk)
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    log.error("Error en handler: %s", context.error)
+    logging.getLogger("bot").error(f"Error en handler: {context.error}")
     try:
         if isinstance(update, Update) and update.effective_message:
             await update.effective_message.reply_text("⚠️ Ocurrió un error. Intenta de nuevo.")
     except Exception:
         pass
 
-# ====== APP BUILDER (AIORateLimiter opcional) ======
+# ====== FACTORÍA DE APPLICATION ======
 def build_application() -> Application:
     builder = Application.builder().token(TELEGRAM_TOKEN)
-
-    # Intenta usar AIORateLimiter si está disponible; si no, sigue sin él.
-    try:
-        from telegram.ext import AIORateLimiter
-        builder = builder.rate_limiter(AIORateLimiter())
-        log.info("AIORateLimiter habilitado.")
-    except Exception as e:
-        log.warning("AIORateLimiter no disponible (%s). Continuando sin rate limiter…", e)
+    # Rate limiter opcional si está disponible
+    if AIORateLimiter is not None:
+        try:
+            builder = builder.rate_limiter(AIORateLimiter())
+        except Exception as e:
+            logging.getLogger("bot").warning(f"No se aplicó AIORateLimiter: {e}")
 
     app = builder.build()
     app.add_handler(CommandHandler("start", start))
@@ -185,12 +204,18 @@ def build_application() -> Application:
     app.add_error_handler(error_handler)
     return app
 
-# ====== ENTRYPOINT ======
+# ====== MAIN ======
 def main():
-    # Render: lo ideal es un 'Background Worker' con comando `python bot.py`.
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+    
+    if os.environ.get("PORT"):
+        th = threading.Thread(target=start_health_server, daemon=True)
+        th.start()
+
     application = build_application()
-    log.info("Bot corriendo con long polling.")
-    application.run_polling(close_loop=False, allowed_updates=Update.ALL_TYPES)
+    
+    print("Bot corriendo con long polling.")
+    application.run_polling(close_loop=False)
 
 if __name__ == "__main__":
     main()
