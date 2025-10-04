@@ -1,6 +1,7 @@
 
 
-python-telegram-bot[webhooks,rate-limiter]>=20.7,<22
+python-telegram-bot[rate-limiter]==21.6
+
 langchain-google-genai==1.0.7
 google-generativeai==0.7.2
 langchain>=0.2,<0.3
