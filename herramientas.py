@@ -709,15 +709,38 @@ class HerramientaCripto:
         display = (cid.capitalize() if cid else (sym_upper or "Cripto"))
         return f"{display} → {p['price']} {vs.upper()} (24h: {chg_txt})"
 
-    def _tool_cripto_top(self, entrada: str) -> str:
-        n = 10
-        s = (entrada or "").strip()
-        if s:
-            m = re.search(r"(\d+)", s)
-            if m:
-                try:
-                    n = max(1, min(int(m.group(1)), 50))
-                except Exception:
-                    n = 10
-        return self.herramienta_cripto.obtener_top_criptos(n=n, vs="usd")
+    def obtener_top_criptos(self, n: int = 10, vs: str = "usd") -> str:
+        n = max(1, min(int(n), 50))
+
+        # si CoinGecko está temporalmente bloqueado
+        if time.time() < self._gecko_block_until:
+            return "CoinGecko está limitando consultas ahora mismo. Intenta de nuevo en unos segundos."
+
+        try:
+            js = self._get(
+                "/coins/markets",
+                {
+                    "vs_currency": vs,
+                    "order": "market_cap_desc",
+                    "per_page": n,
+                    "page": 1,
+                    "price_change_percentage": "24h",
+                },
+            )
+        except requests.RequestException:
+            return "CoinGecko está limitando consultas ahora mismo. Intenta de nuevo en unos segundos."
+
+        if not isinstance(js, list) or not js:
+            return "No pude obtener el top de criptomonedas."
+
+        out = [f"Top {n} criptos por capitalización ({vs.upper()}):", ""]
+        for i, it in enumerate(js, 1):
+            name = it.get("name", "N/D")
+            sym = (it.get("symbol") or "").upper()
+            px = it.get("current_price")
+            ch = it.get("price_change_percentage_24h")
+            ch_txt = f"{ch:.2f}%" if isinstance(ch, (int, float)) else "N/D"
+            out.append(f"{i}. {name} ({sym}): {px} {vs.upper()}  |  24h: {ch_txt}")
+        return "\n".join(out)
+
 
