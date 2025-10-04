@@ -146,6 +146,8 @@ class AgenteMultiAPI:
         vs = (m.group(1).lower() if m else "usd")
         return self.herramienta_cripto.obtener_precio_cripto(s, vs=vs)
 
+
+
     # ------------------------------------------------------------
 
     def _crear_herramientas_langchain(self) -> list:
