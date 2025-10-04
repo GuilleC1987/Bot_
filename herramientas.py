@@ -717,7 +717,7 @@ class HerramientaCripto:
         return None
 
     # ---------- API pública ----------
-    def obtener_precio_cripto(self, consulta: str, vs: str = "usd") -> str:
+    def obtener_precio(self, consulta: str, vs: str = "usd") -> str:
         """
         Entrada flexible:
           - "btc" / "bitcoin"

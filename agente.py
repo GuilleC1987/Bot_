@@ -153,84 +153,71 @@ class AgenteMultiAPI:
     def _crear_herramientas_langchain(self) -> list:
         """
         Construye la lista de Tools para el agente.
-        Forzamos string-only con infer_schema=False y agregamos alias por compatibilidad.
+        TODAS string-only (infer_schema=False) para evitar 'Missing some input keys'.
         """
         from langchain.tools import Tool
 
-        herramientas = [
+        return [
             Tool.from_function(
                 name="ConsultarClima",
                 func=self.herramienta_clima.obtener_clima_actual,
-                description="Obtiene información del clima actual de una ciudad. Input: nombre de la ciudad.",
-                infer_schema=False,  # <- fuerza un único 'tool_input' (str)
+                description="Clima actual de una ciudad. Input: nombre de la ciudad.",
+                infer_schema=False,
             ),
-
-  
-
+            Tool.from_function(
+                name="NoticiasWallStreet",
+                func=self._tool_noticias_str,   # <- string-only
+                description=(
+                    "Noticias financieras (Wall Street). "
+                    "Pásame texto ('Tesla', 'AAPL', 'inflación') o vacío para titulares generales."
+                ),
+                infer_schema=False,
+            ),
             Tool.from_function(
                 name="PrecioAccion",
                 func=self.herramienta_noticias_financieras.obtener_precio_accion,
                 description=(
-                    "Obtén el precio actual de una acción a partir del símbolo o NOMBRE. "
-                    "Ej.: 'Apple' o 'AAPL'. Devuelve precio, apertura, máximo, mínimo y hora."
+                    "Precio de una acción por símbolo o NOMBRE. Ej.: 'Apple' o 'AAPL'. "
+                    "Devuelve precio, apertura, máximo, mínimo y hora."
                 ),
                 infer_schema=False,
             ),
             Tool.from_function(
                 name="BuscarWeb",
                 func=self.herramienta_busqueda.buscar_web,
-                description="Busca información general en la web. Input: término/pregunta.",
+                description="Busca información general en la web. Input: término o pregunta.",
                 infer_schema=False,
             ),
             Tool.from_function(
                 name="ObtenerFecha",
                 func=self.herramienta_fecha.obtener_fecha_actual,
-                description="Obtiene fecha/hora local del servidor ('completo','fecha','hora','iso','simple').",
+                description="Fecha/hora del servidor ('completo','fecha','hora','iso','simple').",
                 infer_schema=False,
             ),
             Tool.from_function(
                 name="ObtenerFechaDesdePrompt",
-                func=lambda s: self._tool_fecha_desde_prompt_str(s),
+                func=self._tool_fecha_desde_prompt_str,  # wrapper string-only
                 description=(
-                    "Devuelve fecha/hora local detectando ciudad en el texto; "
-                    "opcional 'formato: completo|fecha|hora|iso|simple' en el mismo texto."
+                    "Fecha/hora local detectando ciudad en el texto; "
+                    "puedes incluir 'formato: completo|fecha|hora|iso|simple'."
                 ),
+                infer_schema=False,
+            ),
+            # --- CRIPTO ---
+            Tool.from_function(
+                name="ObtenerPrecioCripto",
+                func=self._tool_cripto_precio,  # wrapper string-only
+                description="Precio cripto. Ej.: 'bitcoin', 'btc', 'eth usd', 'sol vs: eur'.",
                 infer_schema=False,
             ),
             Tool.from_function(
                 name="ObtenerTopCripto",
-                func=lambda s: self._tool_cripto_top(s),
-                description=(
-                    "Obtiene el top N cripto por market cap. "
-                    "Entrada opcional: número o texto tipo 'top 5' (default 10)."
-                ),
+                func=self._tool_cripto_top,  # wrapper string-only
+                description="Top N criptos por market cap. Input opcional: número (default 10).",
                 infer_schema=False,
             ),
-            Tool.from_function(
-                name="ObtenerPrecioCripto",
-                func=lambda s: self._tool_cripto_precio(s),
-                description=(
-                    "Obtiene el precio de una cripto específica. "
-                    "Ej: 'bitcoin', 'eth', 'sol'. "
-                    "También puedes indicar moneda fiat: 'eth vs: eur'."
-                ),
-                infer_schema=False,
-            ),
-            Tool(
-                name="PrecioCripto",
-                func=self.herramienta_cripto.obtener_precio,
-                description="Precio de una criptomoneda. Ej.: 'bitcoin', 'btc', 'eth usd'. Devuelve precio y % 24h.",
-            ),
-            Tool(
-                name="TopCriptos",
-                func=self.herramienta_cripto.obtener_top_criptos,
-                description="Top N criptomonedas por capitalización (default N=10). Input: '10' o vacío.",
-            ),
-            
-            ]
+        ]
 
-
-        return herramientas
     
     def procesar_consulta(self, consulta: str) -> str:
         """Procesa la consulta con el agente y devuelve el texto resultante."""
