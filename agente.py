@@ -165,15 +165,6 @@ class AgenteMultiAPI:
                 infer_schema=False,
             ),
             Tool.from_function(
-                name="NoticiasWallStreet",
-                func=self._tool_noticias_str,   # <- string-only
-                description=(
-                    "Noticias financieras (Wall Street). "
-                    "Pásame texto ('Tesla', 'AAPL', 'inflación') o vacío para titulares generales."
-                ),
-                infer_schema=False,
-            ),
-            Tool.from_function(
                 name="PrecioAccion",
                 func=self.herramienta_noticias_financieras.obtener_precio_accion,
                 description=(
