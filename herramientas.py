@@ -769,5 +769,6 @@ class HerramientaCripto:
             ch = it.get("price_change_percentage_24h")
             ch_txt = f"{ch:.2f}%" if isinstance(ch, (int, float)) else "N/D"
             out += [f"{i}. {name} ({sym}): {px} {vs.upper()}  |  24h: {ch_txt}"]
+        
         return "\n".join(out)
 

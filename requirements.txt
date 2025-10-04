@@ -8,7 +8,7 @@ langchain-google-genai==1.0.7
 google-generativeai==0.7.2
 
 yfinance==0.2.43
-curl_cffi==0.6.2
+#curl_cffi==0.6.2
 tzdata==2025.1
 geopy==2.4.1
 timezonefinder==6.5.5

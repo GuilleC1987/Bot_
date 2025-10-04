@@ -224,6 +224,7 @@ class AgenteMultiAPI:
                 func=self.herramienta_cripto.obtener_top_criptos,
                 description="Top N criptomonedas por capitalización (default N=10). Input: '10' o vacío.",
             ),
+            
             ]
 
 
