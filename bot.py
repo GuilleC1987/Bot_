@@ -4,7 +4,10 @@ import warnings
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# ---- Solo para Windows local; en Render (Linux) no afecta ----
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
+
+
+
 if os.name == "nt":
     os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
@@ -12,7 +15,7 @@ if os.name == "nt":
 from dotenv import load_dotenv
 load_dotenv()  # .env local
 
-# Silenciar deprecations verbosas de LangChain si aparecen
+# Silenciar deprecations verbosas de LangChain
 try:
     from langchain_core._api import LangChainDeprecationWarning
     warnings.filterwarnings("ignore", category=LangChainDeprecationWarning)
@@ -27,7 +30,7 @@ from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-# AIORateLimiter (opcional). Si no está instalado, continuamos sin él.
+# AIORateLimiter
 AIORateLimiter = None
 try:
     from telegram.ext import AIORateLimiter as _AIORateLimiter
@@ -37,7 +40,7 @@ except Exception as e:
         f"AIORateLimiter no disponible ({e}). Continuando sin rate limiter…"
     )
 
-# ====== IMPORTA TU AGENTE ======
+
 from agente import AgenteMultiAPI
 
 # ====== CONFIG ======
@@ -86,14 +89,14 @@ INSTRUCCION_START = "Para comenzar digita start"
 HELP_TEXT = (
     "Puedo ayudarte con:\n"
     "• Consultar clima (ConsultarClima)\n"
-    "• Noticias del mercado (NoticiasWallStreet)\n"
+    "• Precio ciptomonedas más importantes (PrecioCRIPTOMonedas)\n"
     "• Buscar en la web (BuscarWeb)\n"
     "• Obtener fecha/hora (ObtenerFecha)\n"
     "• Hora por ciudad en tu mensaje (ObtenerFechaDesdePrompt)\n\n"
     "Tip: envía cualquier pregunta y te respondo. Escribe 'exit' para terminar."
 )
 
-# ====== MINI HEALTH SERVER PARA RENDER ======
+
 class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         # /, /health, /live → 200 OK
@@ -103,7 +106,7 @@ class _HealthHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"ok")
 
     def log_message(self, format, *args):
-        # Evita ruido en logs
+      
         return
 
 def start_health_server():
@@ -189,7 +192,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 # ====== FACTORÍA DE APPLICATION ======
 def build_application() -> Application:
     builder = Application.builder().token(TELEGRAM_TOKEN)
-    # Rate limiter opcional si está disponible
+  
     if AIORateLimiter is not None:
         try:
             builder = builder.rate_limiter(AIORateLimiter())
