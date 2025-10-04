@@ -215,17 +215,14 @@ class AgenteMultiAPI:
                 infer_schema=False,
             ),
             Tool(
-                name="PrecioCrypto",
-                func=self.herramienta_cripto.precio,
-                description=(
-                    "Precio actual de una criptomoneda. Input: símbolo o nombre (ej. 'BTC', 'bitcoin', 'btc/usdt'). "
-                    "Devuelve precio, cambio 24h y market cap."
-                ),
+                name="PrecioCripto",
+                func=self.herramienta_cripto.obtener_precio_cripto,
+                description="Precio de una criptomoneda. Ej.: 'bitcoin', 'btc', 'eth usd'. Devuelve precio y % 24h.",
             ),
             Tool(
                 name="TopCriptos",
-                func=self.herramienta_cripto.top,
-                description="Top N criptomonedas por market cap. Input: número N (por defecto 10).",
+                func=self.herramienta_cripto.obtener_top_criptos,
+                description="Top N criptomonedas por capitalización (default N=10). Input: '10' o vacío.",
             ),
             ]
 

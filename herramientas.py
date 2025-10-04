@@ -640,175 +640,134 @@ class HerramientaBusquedaWeb:
             return f"Error al buscar en la web: {str(e)}"
 
 
-
-
 class HerramientaCripto:
     """
-    Precios cripto vía CoinGecko (sin API key).
-    - Resolver robusto: 'bitcoin', 'BTC', 'btc-usd', 'btc/usdt' → bitcoin
-    - Evita falsos positivos (memecoins) priorizando símbolo exacto y mayor market cap.
+    Precio de criptomonedas usando CoinGecko (free).
+    - Reintentos con backoff ante 429/5xx.
+    - Caché en memoria (TTL) para reducir rate limit.
     """
+    BASE = os.environ.get("COINGECKO_BASE", "https://api.coingecko.com/api/v3")
 
-    def __init__(self):
-        self.base_url = "https://api.coingecko.com/api/v3"
-        self._sess = requests.Session()
-        self._sess.headers.update({
-            "User-Agent": "MiAgente/1.0 (+https://example.local)",
-            "Accept": "application/json",
-        })
-        self._timeout = 15
+    def __init__(self, price_ttl: int = 30):
+        self.sess = requests.Session()
+        self.sess.headers.update({"User-Agent": "MiAgente/1.0 (+https://example.local)"})
+        self._ids_cache = {"ts": 0, "maps": None}   # refresca cada 6h
+        self._price_cache = {}                      # (coin_id, vs) -> {ts, data}
+        self.PRICE_TTL = max(5, int(price_ttl))
 
-    def _get(self, path: str, params: dict | None = None):
-        url = f"{self.base_url}{path}"
-        r = self._sess.get(url, params=params or {}, timeout=self._timeout)
-        # Manejo básico de límites/errores (CoinGecko free)
-        if r.status_code in (429, 418):
-            raise RuntimeError("Rate limit de CoinGecko. Intenta en unos segundos.")
-        if r.status_code >= 400:
-            try:
-                msg = r.json()
-            except Exception:
-                msg = r.text
-            raise RuntimeError(f"HTTP {r.status_code}: {msg}")
-        return r.json()
+    # ---------- núcleo HTTP con backoff ----------
+    def _sleep_backoff(self, attempt: int, retry_after: str | None) -> None:
+        delay = float(retry_after) if retry_after else min(2 ** attempt, 10)
+        time.sleep(delay)
 
-    @staticmethod
-    def _norm(q: str) -> str:
-        s = (q or "").strip().lower()
-        if s.startswith("$"):
-            s = s[1:]
-        s = s.replace("-", "").replace("_", "").replace("/", "")
-        # elimina sufijos comunes de pares
-        for suf in ("usd", "usdt", "busd", "usdc"):
-            if s.endswith(suf):
-                s = s[: -len(suf)]
-        return s
+    def _get(self, path: str, params: dict | None = None, max_attempts: int = 4):
+        url = f"{self.BASE}{path}"
+        for attempt in range(1, max_attempts + 1):
+            r = self.sess.get(url, params=params or {}, timeout=12)
+            # Manejo de rate limit / server errors
+            if r.status_code == 429 or r.status_code >= 500:
+                self._sleep_backoff(attempt, r.headers.get("Retry-After"))
+                continue
+            r.raise_for_status()
+            return r.json()
+        raise requests.RequestException("Rate limit o error persistente de CoinGecko.")
 
-    def _resolver_coin(self, query: str) -> dict | None:
-        """
-        Devuelve dict {'id','symbol','name'} para la mejor coincidencia.
-        Estrategia:
-          1) atajos comunes (btc->bitcoin, eth->ethereum, xbt->bitcoin, etc.)
-          2) /search de CoinGecko y ranking:
-             - símbolo exacto > id exacto > nombre exacto > contiene
-             - desempate por mayor market cap (menor 'market_cap_rank')
-        """
-        raw = (query or "").strip()
-        if not raw:
+    # ---------- resolución de ID ----------
+    def _load_ids(self, force: bool = False):
+        now = time.time()
+        if (not force) and self._ids_cache["maps"] and (now - self._ids_cache["ts"] < 6 * 3600):
+            return self._ids_cache["maps"]
+
+        data = self._get("/coins/list", {"include_platform": "false"})
+        maps = {"by_id": set(), "by_symbol": {}, "by_name": {}}
+        for it in data:
+            cid = it["id"]
+            sym = (it.get("symbol") or "").lower()
+            name = (it.get("name") or "").lower()
+            maps["by_id"].add(cid)
+            if sym:
+                maps["by_symbol"].setdefault(sym, []).append(cid)
+            if name:
+                maps["by_name"].setdefault(name, []).append(cid)
+        self._ids_cache = {"ts": now, "maps": maps}
+        return maps
+
+    def _resolve_id(self, q: str) -> str | None:
+        q = (q or "").strip().lower().lstrip("$")
+        if not q:
             return None
-        norm = self._norm(raw)
+        m = self._load_ids()
 
-        # Atajos mínimos para los top (evita memecoins raros)
-        SHORT = {
-            "btc": "bitcoin", "xbt": "bitcoin",
-            "eth": "ethereum",
-            "sol": "solana",
-            "ada": "cardano",
-            "xrp": "ripple",
-            "bnb": "binancecoin",
-            "doge": "dogecoin",
-        }
-        if norm in SHORT:
-            return {"id": SHORT[norm], "symbol": norm, "name": SHORT[norm].capitalize()}
+        if q in m["by_id"]:
+            return q
+        if q in m["by_symbol"]:
+            # Si varias monedas comparten símbolo (raro), tomamos la primera
+            return m["by_symbol"][q][0]
+        if q in m["by_name"]:
+            return m["by_name"][q][0]
 
-        # 1) ¿Es un id válido directo?
-        try:
-            js = self._get(f"/coins/{norm}", {"localization": "false", "tickers": "false", "market_data": "false"})
-            return {"id": js["id"], "symbol": js.get("symbol","").lower(), "name": js.get("name","")}
-        except Exception:
-            pass
+        # Búsqueda parcial por nombre (p.ej., 'bitco' → 'bitcoin')
+        for name, lst in m["by_name"].items():
+            if q in name:
+                return lst[0]
+        return None
 
-        # 2) Buscar
-        srch = self._get("/search", {"query": raw})
-        coins = srch.get("coins") or []
-        if not coins:
-            return None
-
-        def score(c):
-            sym = (c.get("symbol") or "").lower()
-            cid = (c.get("id") or "").lower()
-            name = (c.get("name") or "").lower()
-            rank = c.get("market_cap_rank")
-            sc = 0
-            if sym == norm: sc += 100
-            if cid == norm: sc += 90
-            if name == norm: sc += 80
-            if norm and norm in name: sc += 20
-            # mejor market cap ⇒ más puntos
-            if isinstance(rank, int) and rank > 0:
-                sc += max(0, 1000 - rank)
-            return sc
-
-        best = max(coins, key=score)
-        return {"id": best.get("id"), "symbol": best.get("symbol","").lower(), "name": best.get("name","")}
-
-    def precio(self, moneda: str, vs: str = "usd") -> str:
+    # ---------- API pública ----------
+    def obtener_precio_cripto(self, consulta: str, vs: str = "usd") -> str:
         """
-        Devuelve string con precio y cambio 24h. Ej: precio('bitcoin'), precio('btc').
+        Entrada flexible:
+          - "btc" / "bitcoin"
+          - "eth usd" (cambia vs)
         """
-        coin = self._resolver_coin(moneda)
-        if not coin or not coin.get("id"):
-            return f"No pude resolver la cripto para '{moneda}'. Prueba con el símbolo ('BTC') o nombre ('Bitcoin')."
+        s = (consulta or "").strip()
+        parts = s.split()
+        if len(parts) >= 2 and parts[-1].isalpha() and len(parts[-1]) <= 4:
+            vs = parts[-1].lower()
+            coin = " ".join(parts[:-1])
+        else:
+            coin = s
 
-        # /coins/markets devuelve precio + %24h en una sola llamada
-        data = self._get("/coins/markets", {
-            "vs_currency": vs.lower(),
-            "ids": coin["id"],
-            "order": "market_cap_desc",
-            "per_page": 1,
-            "page": 1,
-            "price_change_percentage": "24h"
-        })
-        if not data:
-            return f"No se obtuvo precio para {moneda}."
+        cid = self._resolve_id(coin)
+        if not cid:
+            return f"No pude reconocer la cripto '{consulta}'. Prueba con 'bitcoin', 'btc', 'ethereum', 'eth'."
 
-        x = data[0]
-        name = x.get("name") or coin["name"] or moneda
-        sym  = (x.get("symbol") or coin["symbol"] or "").upper()
-        price = x.get("current_price")
-        ch24  = x.get("price_change_percentage_24h")
-        mcap  = x.get("market_cap")
-        if price is None:
-            return f"No se obtuvo precio para {moneda}."
+        key = (cid, vs.lower())
+        now = time.time()
+        hit = self._price_cache.get(key)
+        if hit and now - hit["ts"] < self.PRICE_TTL:
+            p = hit["data"]
+        else:
+            js = self._get(
+                "/simple/price",
+                {"ids": cid, "vs_currencies": vs, "include_24hr_change": "true"},
+            )
+            if not isinstance(js, dict) or cid not in js or vs not in js[cid]:
+                return f"No hay precio disponible para {cid} en {vs.upper()}."
+            p = {
+                "price": js[cid][vs],
+                "chg": js[cid].get(f"{vs}_24h_change"),
+            }
+            self._price_cache[key] = {"ts": now, "data": p}
 
-        def _fmt_n(n):
-            try:
-                return f"{n:,.2f}"
-            except Exception:
-                return str(n)
+        chg = p["chg"]
+        chg_txt = f"{chg:.2f}%" if isinstance(chg, (int, float)) else "N/D"
+        return f"{cid.capitalize()} → {p['price']} {vs.upper()} (24h: {chg_txt})"
 
-        out = [
-            f"=== {name} ({sym}) ===",
-            f"Precio: { _fmt_n(price) } {vs.upper()}",
-            f"Cambio 24h: { (f'{ch24:.2f}%' if isinstance(ch24,(int,float)) else 'N/D') }",
-        ]
-        if isinstance(mcap, (int,float)):
-            out.append(f"Market Cap: { _fmt_n(mcap) } {vs.upper()}")
+    def obtener_top_criptos(self, n: int = 10, vs: str = "usd") -> str:
+        n = max(1, min(int(n), 50))
+        js = self._get(
+            "/coins/markets",
+            {"vs_currency": vs, "order": "market_cap_desc", "per_page": n, "page": 1, "price_change_percentage": "24h"},
+        )
+        if not isinstance(js, list) or not js:
+            return "No pude obtener el top de criptomonedas."
+        out = [f"Top {n} criptos por capitalización ({vs.upper()}):", ""]
+        for i, it in enumerate(js, 1):
+            name = it.get("name", "N/D")
+            sym = (it.get("symbol") or "").upper()
+            px = it.get("current_price")
+            ch = it.get("price_change_percentage_24h")
+            ch_txt = f"{ch:.2f}%" if isinstance(ch, (int, float)) else "N/D"
+            out += [f"{i}. {name} ({sym}): {px} {vs.upper()}  |  24h: {ch_txt}"]
         return "\n".join(out)
 
-    def top(self, n: int = 10, vs: str = "usd") -> str:
-        """
-        Top N por market cap.
-        """
-        try:
-            n = max(1, min(50, int(n)))
-        except Exception:
-            n = 10
-        data = self._get("/coins/markets", {
-            "vs_currency": vs.lower(),
-            "order": "market_cap_desc",
-            "per_page": n,
-            "page": 1,
-            "price_change_percentage": "24h"
-        })
-        if not data:
-            return "No se pudieron obtener criptomonedas."
-
-        lines = [f"Top {n} criptomonedas por market cap ({vs.upper()}):", ""]
-        for i, x in enumerate(data, 1):
-            name = x.get("name","")
-            sym  = (x.get("symbol","").upper())
-            price = x.get("current_price")
-            ch24  = x.get("price_change_percentage_24h")
-            lines.append(f"{i}. {name} ({sym}) — {price:,.2f} {vs.upper()}  |  24h: {ch24:.2f}%")
-        return "\n".join(lines)
