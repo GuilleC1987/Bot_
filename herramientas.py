@@ -220,18 +220,20 @@ class HerramientaClima:
 
             location = data["location"]
             current = data["current"]
-            clima_info = f"""
-    Clima en {location['name']}, {location["country"]}
-    Temperatura: {current["temp_c"]}°C (se siente como {current["feelslike_c"]}°C)
-    Condición: {current["condition"]["text"]}
-    Viento: {current["wind_kph"]} km/h
-    Humedad: {current["humidity"]}%
-    Visibilidad: {current["vis_km"]} km
-    Última actualización: {current["last_updated"]}
-    """.strip()
-                return clima_info
-            except Exception as e:
-                return f"Error al obtener el clima: {str(e)}"
+
+            clima_info = (
+                f"Clima en {location['name']}, {location['country']}\n"
+                f"Temperatura: {current['temp_c']}°C (se siente como {current['feelslike_c']}°C)\n"
+                f"Condición: {current['condition']['text']}\n"
+                f"Viento: {current['wind_kph']} km/h\n"
+                f"Humedad: {current['humidity']}%\n"
+                f"Visibilidad: {current['vis_km']} km\n"
+                f"Última actualización: {current['last_updated']}"
+            )
+            return clima_info
+
+        except Exception as e:
+            return f"Error al obtener el clima: {str(e)}"
 
 
 # ============================================================
