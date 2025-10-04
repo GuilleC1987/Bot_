@@ -10,3 +10,4 @@ timezonefinder
 tzdata
 requests
 httpx
+python-dotenv>=1.0.1
