@@ -94,19 +94,29 @@ class AgenteMultiAPI:
         base_system = get_system_prompt().format(nombre=self.nombre)
 
         # Agente conversacional
+        # dentro de __init__ de AgenteMultiAPI, donde haces initialize_agent(...)
         self.agente = initialize_agent(
             tools=self.herramientas,
             llm=self.llm,
             agent=AgentType.CONVERSATIONAL_REACT_DESCRIPTION,
             memory=self.memoria,
-            verbose=False,
+            # ⬇️ evita que “explote” al quedarse sin pasos; pide al LLM que genere respuesta final
+            early_stopping_method="generate",
+            # ⬇️ sube un poco el margen (puedes ajustar por ENV)
+            max_iterations=int(os.getenv("AGENT_MAX_STEPS", "8")),
+            max_execution_time=int(os.getenv("AGENT_MAX_SECS", "25")),
             handle_parsing_errors=True,
-            max_iterations=4,
+            verbose=False,
             agent_kwargs={
                 "system_message": base_system,
-                "prefix": "Eres un asistente útil. Responde en español o inglés y de forma directa.",
+                # ⬇️ consejo para no ciclar herramientas
+                "prefix": (
+                    "Eres un asistente útil. Responde en español o inglés y de forma directa. "
+                    "Si tras pocos intentos con herramientas no estás seguro, responde directamente sin más herramientas."
+                ),
             },
         )
+
 
     # ------------------- Wrappers string-only -------------------
     def _tool_fecha_desde_prompt_str(self, entrada: str) -> str:
@@ -212,13 +222,21 @@ class AgenteMultiAPI:
 
     # ------------------- API pública -------------------
     def procesar_consulta(self, consulta: str) -> str:
-        """Procesa la consulta con el agente y devuelve el texto resultante."""
+        """Procesa la consulta con el agente y, si se queda sin pasos/tiempo, hace fallback al LLM directo."""
         try:
             resp = self.agente.invoke({"input": consulta})
             if isinstance(resp, dict) and "output" in resp:
                 return resp["output"]
             return str(resp)
         except Exception as e:
+            msg = str(e)
+            if "Agent stopped due to iteration limit or time limit" in msg:
+                # Fallback: responder sin herramientas
+                try:
+                    llm_resp = self.llm.invoke(consulta)
+                    return getattr(llm_resp, "content", str(llm_resp)) or "Lo siento, no pude completar la consulta."
+                except Exception as e2:
+                    return f"No pude completar la consulta ahora mismo ({e2})."
             return f"Error al procesar la consulta: {e}"
 
     def mostrar_capacidades_del_agente(self):

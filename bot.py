@@ -184,8 +184,8 @@ async def reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- llamada al agente ---
     try:
         loop = asyncio.get_running_loop()
-        resp = await loop.run_in_executor(None, partial(agent.agente.invoke, {"input": user_text}))
-        result = resp["output"] if isinstance(resp, dict) and "output" in resp else str(resp)
+        # ⬇️ ahora usamos el método de alto nivel con fallback
+        result = await loop.run_in_executor(None, partial(agent.procesar_consulta, user_text))
     except Exception as e:
         result = f"⚠️ Error al invocar el agente: {e}"
     finally:
