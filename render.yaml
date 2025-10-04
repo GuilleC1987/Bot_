@@ -1,8 +1,9 @@
 services:
-  - type: worker
-    name: telegram-bot
+  - type: web
+    name: mi-telegram-bot
     env: python
-    buildCommand: "pip install --upgrade pip && pip install -r requirements.txt"
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
     startCommand: "python bot.py"
     autoDeploy: true
     envVars:
@@ -12,5 +13,3 @@ services:
         sync: false
       - key: WEATHER_API_KEY
         sync: false
-      - key: AGENT_VERBOSE
-        value: "0"
