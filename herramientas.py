@@ -481,20 +481,19 @@ class HerramientaMercadosYahoo:
 
     def obtener_precio_accion(self, symbol_o_nombre: str) -> str:
         """
-        Acepta nombre o ticker. Resuelve con Yahoo search (sin mapeos) y usa yfinance.
-        ¡OJO! No pasamos session a yfinance (usa curl_cffi interno).
+        Acepta nombre o ticker. Resuelve con Yahoo search (sin mapeos) y usa:
+        1) yfinance.fast_info
+        2) Yahoo Quote API (query1)
+        3) Stooq CSV
         """
-        q = self._sanitize(symbol_o_nombre)
-        sym = self._resolver_yahoo_simbolo(q)
+        sym = self._resolver_yahoo_simbolo(symbol_o_nombre)
         if not sym:
             return f"No pude resolver el símbolo para '{symbol_o_nombre}'. Prueba con el ticker (p. ej., TSLA)."
 
-        # 👇 sin session
-        t = yf.Ticker(sym)
-
-        # 1) fast_info
+        # --- 1) yfinance.fast_info (sin session explícita) ---
         c = o = h = l = pc = None
         try:
+            t = yf.Ticker(sym)  # ¡no pasar session!
             fi = getattr(t, "fast_info", None)
             if fi:
                 c  = getattr(fi, "last_price", None)
@@ -505,28 +504,26 @@ class HerramientaMercadosYahoo:
         except Exception:
             pass
 
-        # 2) fallback history
-        if c is None or o is None or h is None or l is None:
-            try:
-                df = t.history(period="1d", interval="1m")
-                if df is None or df.empty:
-                    df = t.history(period="5d", interval="1d")
-                if df is not None and not df.empty:
-                    last = df.iloc[-1]
-                    if "Close" in last and c is None: c = float(last["Close"])
-                    if "Open"  in last and o is None: o = float(last["Open"])
-                    if "High" in df and h is None:    h = float(df["High"].max())
-                    if "Low"  in df and l is None:    l = float(df["Low"].min())
-                    if pc is None and len(df) >= 2 and "Close" in df:
-                        try: pc = float(df["Close"].iloc[-2])
-                        except Exception: pass
-            except Exception:
-                pass
+        # --- 2) Yahoo Quote API directo ---
+        if c is None:
+            q = self._yahoo_quote_api(sym)
+            if q:
+                c, o, h, l, pc = q["c"], q["o"], q["h"], q["l"], q["pc"]
+                ts = q["t"]
+            else:
+                ts = int(time.time())
+        else:
+            ts = int(time.time())
+
+        # --- 3) Stooq fallback ---
+        if c is None:
+            q2 = self._stooq_quote(sym)
+            if q2:
+                c, o, h, l, pc, ts = q2["c"], q2["o"], q2["h"], q2["l"], q2["pc"], q2["t"]
 
         if c is None:
-            return f"No hay datos de precio para {sym}. (¿símbolo correcto?)"
+            return f"No hay datos de precio para {sym} ahora mismo."
 
-        ts = int(time.time())
         return (
             f"=== {sym} ===\n"
             f"Precio actual: {c}\n"
@@ -557,7 +554,74 @@ class HerramientaMercadosYahoo:
         t = [int(pd_ts.timestamp()) for pd_ts in df.index.to_pydatetime()]
         return {"s":"ok","t":t,"o":o,"h":h,"l":l,"c":c,"v":v}
 
+    def _yahoo_quote_api(self, symbol: str) -> dict | None:
+        """
+        Fallback directo a la API pública de Yahoo Quote.
+        Devuelve dict con c/o/h/l/pc si se puede; None si falla.
+        """
+        url = "https://query1.finance.yahoo.com/v7/finance/quote"
+        params = {"symbols": symbol}
+        try:
+            r = requests.get(
+                url, params=params, timeout=10,
+                headers={"User-Agent": "Mozilla/5.0"}
+            )
+            r.raise_for_status()
+            js = r.json()
+            res = ((js or {}).get("quoteResponse") or {}).get("result") or []
+            if not res:
+                return None
+            q = res[0]
+            out = {
+                "c": q.get("regularMarketPrice"),
+                "o": q.get("regularMarketOpen"),
+                "h": q.get("regularMarketDayHigh"),
+                "l": q.get("regularMarketDayLow"),
+                "pc": q.get("regularMarketPreviousClose"),
+                "t": q.get("regularMarketTime"),
+            }
+            # válido si al menos tenemos precio actual
+            if out["c"] is None:
+                return None
+            return out
+        except Exception:
+            return None
 
+    def _stooq_quote(self, symbol: str) -> dict | None:
+        """
+        Último recurso: Stooq (CSV). Útil cuando Yahoo/yfinance falla en ciertos entornos.
+        """
+        try:
+            # Stooq usa minúsculas; índices y algunos símbolos tienen formato especial
+            s = symbol.lower()
+            url = f"https://stooq.com/q/l/?s={s}&f=sd2t2ohlcv&h&e=csv"
+            r = requests.get(url, timeout=10, headers={"User-Agent":"Mozilla/5.0"})
+            r.raise_for_status()
+            # parse CSV
+            content = r.text.strip()
+            rows = list(csv.DictReader(StringIO(content)))
+            if not rows:
+                return None
+            row = rows[0]
+            if row.get("Close") in ("N/D", "N/A", None, ""):
+                return None
+            # Construimos campos similares
+            def f(x):
+                try: return float(x)
+                except Exception: return None
+            out = {
+                "c": f(row.get("Close")),
+                "o": f(row.get("Open")),
+                "h": f(row.get("High")),
+                "l": f(row.get("Low")),
+                "pc": None,            # Stooq “lite” no trae previous close en este endpoint
+                "t": int(datetime.now(timezone.utc).timestamp()),
+            }
+            if out["c"] is None:
+                return None
+            return out
+        except Exception:
+            return None
 
 
 class HerramientaBusquedaWeb:
