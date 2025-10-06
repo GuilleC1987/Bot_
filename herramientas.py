@@ -304,7 +304,6 @@ class HerramientaAccionesStooq:
             except Exception:
                 return None
 
-        # Nota: Stooq no trae "previous close" directo aquí → lo dejamos N/D
         return {
             "c": f(row.get("Close")),
             "o": f(row.get("Open")),
@@ -658,7 +657,7 @@ class HerramientaCripto:
         else:
             coin = s
 
-        # ⚡ ultra-rápido: sin red
+      
         cid, sym_upper = self._resolve_id_fast(coin)
         if not cid and not sym_upper:
             return f"No pude reconocer la cripto '{consulta}'. Prueba con 'bitcoin', 'btc', 'ethereum', 'eth'."
@@ -685,7 +684,6 @@ class HerramientaCripto:
             if p is None and sym_try:
                 p = self._fallback_binance_price(sym_try, vs) or p
 
-            # 2) SOLO si la moneda está en el seed (tenemos cid), intenta CoinGecko rápido (1 intento)
             if p is None and cid and time.time() >= self._gecko_block_until:
                 try:
                     js = self._get_quick(

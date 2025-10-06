@@ -29,9 +29,7 @@ HERRAMIENTAS DISPONIBLES:
 - ObtenerFecha: fecha y hora actual (Action Input: "")
 - ConsultarClima: clima de ciudades (Action Input: "nombre_ciudad")
 - BuscarWeb: búsquedas generales (Action Input: "consulta")
-- PrecioAcciones: precio actual de acciones (Action Input: "AAPL")
 - PrecioCrypto: precio actual de una criptomoneda (Action Input: "BTC")
-- TopCriptos: top N criptomonedas por market cap (Action Input: "10")
 """
 
 def get_conversation_prompt():

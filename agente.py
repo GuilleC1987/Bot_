@@ -22,17 +22,14 @@ from herramientas import (
     HerramientaCripto,
 )
 
-# Silencio de librerías ruidosas (opcional)
+
 os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
 os.environ.setdefault("GRPC_TRACE", "")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
 
 def _ensure_ca_bundle_safe_path():
-    """
-    En Windows con rutas con acentos/espacios, fija CA bundles.
-    En Linux/Render no hace daño (no hace nada si no aplica).
-    """
+
     try:
         import certifi, shutil
         cafile = certifi.where()
@@ -61,7 +58,7 @@ _ensure_ca_bundle_safe_path()
 
 class AgenteMultiAPI:
     """
-    Asistente que integra múltiples APIs (clima, mercados, búsqueda web, fecha, cripto).
+    Asistente que integra múltiples APIs (clima, búsqueda web, fecha, precion top cripto).
     """
 
     def __init__(self):
@@ -94,22 +91,22 @@ class AgenteMultiAPI:
         base_system = get_system_prompt().format(nombre=self.nombre)
 
         # Agente conversacional
-        # dentro de __init__ de AgenteMultiAPI, donde haces initialize_agent(...)
+        
         self.agente = initialize_agent(
             tools=self.herramientas,
             llm=self.llm,
             agent=AgentType.CONVERSATIONAL_REACT_DESCRIPTION,
             memory=self.memoria,
-            # ⬇️ evita que “explote” al quedarse sin pasos; pide al LLM que genere respuesta final
+            
             early_stopping_method="generate",
-            # ⬇️ sube un poco el margen (puedes ajustar por ENV)
+
             max_iterations=int(os.getenv("AGENT_MAX_STEPS", "8")),
             max_execution_time=int(os.getenv("AGENT_MAX_SECS", "25")),
             handle_parsing_errors=True,
             verbose=False,
             agent_kwargs={
                 "system_message": base_system,
-                # ⬇️ consejo para no ciclar herramientas
+
                 "prefix": (
                     "Eres un asistente útil. Responde en español o inglés y de forma directa. "
                     "Si tras pocos intentos con herramientas no estás seguro, responde directamente sin más herramientas."
